@@ -1,0 +1,86 @@
+name: 自动发布博客
+
+on:
+  push:
+    paths:
+      - 'input/markdown/**'
+      - 'scripts/**'
+  workflow_dispatch:
+    inputs:
+      force_publish:
+        description: '强制发布所有文章'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  auto-publish:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v3
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        fetch-depth: 0
+
+    - name: 设置Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        cache: 'npm'
+
+    - name: 安装依赖
+      run: |
+        npm install -g hexo-cli
+        npm install gray-matter axios
+
+    - name: 检查是否有新文章
+      id: check-articles
+      run: |
+        if [ -d "input/markdown" ] && [ "$(ls -A input/markdown/*.md 2>/dev/null)" ]; then
+          echo "has_articles=true" >> $GITHUB_OUTPUT
+          echo "📁 发现新的Markdown文件"
+        else
+          echo "has_articles=false" >> $GITHUB_OUTPUT
+          echo "📝 没有发现新的Markdown文件"
+        fi
+
+    - name: 运行自动发布脚本
+      if: steps.check-articles.outputs.has_articles == 'true' || github.event.inputs.force_publish == 'true'
+      run: |
+        node scripts/auto-publish.js
+
+    - name: 检查构建结果
+      if: steps.check-articles.outputs.has_articles == 'true' || github.event.inputs.force_publish == 'true'
+      run: |
+        if [ -d "public" ] && [ "$(ls -A public)" ]; then
+          echo "✅ 构建成功"
+        else
+          echo "❌ 构建失败"
+          exit 1
+        fi
+
+    - name: 提交更改
+      if: steps.check-articles.outputs.has_articles == 'true' || github.event.inputs.force_publish == 'true'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add .
+        git diff --staged --quiet || git commit -m "自动发布: $(date '+%Y-%m-%d %H:%M:%S')"
+        git push
+
+    - name: 清理输入文件
+      if: steps.check-articles.outputs.has_articles == 'true'
+      run: |
+        rm -rf input/markdown/*.md
+        echo "🧹 已清理输入文件"
+
+    - name: 发送通知
+      if: always()
+      run: |
+        if [ "${{ steps.check-articles.outputs.has_articles }}" == "true" ]; then
+          echo "🎉 博客自动发布完成！"
+        else
+          echo "ℹ️ 没有新文章需要发布"
+        fi

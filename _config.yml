@@ -1,0 +1,95 @@
+# Hexo配置文件
+# 网站信息
+title: stack3mpty's blog
+subtitle: 个人博客
+description: 基于Hexo的自动化博客
+author: stack3mpty
+language: zh-CN
+timezone: Asia/Shanghai
+
+# URL设置
+url: https://stack3mpty.github.io
+root: /
+permalink: :year/:month/:day/:title/
+permalink_defaults:
+pretty_urls:
+  trailing_index: true
+  trailing_html: true
+
+# 目录设置
+source_dir: source
+public_dir: public
+tag_dir: tags
+archive_dir: archives
+category_dir: categories
+code_dir: downloads/code
+i18n_dir: :lang
+skip_render:
+
+# 写作设置
+new_post_name: :title.md
+default_layout: post
+titlecase: false
+external_link:
+  enable: true
+  field: site
+  exclude: ''
+filename_case: 0
+render_drafts: false
+post_asset_folder: false
+relative_link: false
+future: true
+highlight:
+  enable: true
+  line_number: true
+  auto_detect: false
+  tab_replace: ''
+  wrap: true
+  hljs: false
+
+# 分类和标签
+default_category: uncategorized
+category_map:
+tag_map:
+
+# 日期/时间格式
+date_format: YYYY-MM-DD
+time_format: HH:mm:ss
+
+# 分页设置
+per_page: 10
+pagination_dir: page
+
+# 主题设置
+theme: fluid
+
+# 部署设置
+deploy:
+  type: git
+  repo: https://github.com/stack3mpty/stack3mpty.github.io.git
+  branch: main
+
+# 插件设置
+plugins:
+  - hexo-generator-feed
+  - hexo-generator-sitemap
+  - hexo-generator-search
+  - hexo-renderer-marked
+  - hexo-renderer-stylus
+
+# 搜索设置
+search:
+  path: local-search.xml
+  field: post
+  content: true
+  format: html
+
+# 自动分类设置
+auto_category:
+  enable: true
+  depth: 2
+
+# 自动标签设置
+auto_tag:
+  enable: true
+  max_tags: 10
