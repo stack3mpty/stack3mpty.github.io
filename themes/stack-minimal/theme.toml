@@ -1,0 +1,12 @@
+name = "stack-minimal"
+license = "MIT"
+licenselink = "https://github.com/stack3mpty/stack3mpty.github.io/blob/main/LICENSE"
+description = "A quiet Hugo theme focused on writing."
+homepage = "https://stack3mpty.cn/"
+tags = ["blog", "minimal", "writing"]
+features = ["responsive", "dark-mode", "rss"]
+min_version = "0.120.0"
+
+[author]
+  name = "stack3mpty"
+  homepage = "https://stack3mpty.cn/"
