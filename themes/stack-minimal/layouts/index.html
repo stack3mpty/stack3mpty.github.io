@@ -1,0 +1,33 @@
+{{ define "main" }}
+  <section class="home-intro">
+    <h1>{{ .Title }}</h1>
+    <div class="home-copy">
+      {{ .Content }}
+    </div>
+  </section>
+
+  {{ $posts := first 10 (where site.RegularPages "Section" "posts") }}
+  <section class="post-section" aria-labelledby="latest-posts">
+    <div class="section-heading">
+      <h2 id="latest-posts">最新文章</h2>
+      <a href="{{ "/posts/" | relURL }}">全部文章</a>
+    </div>
+    {{ if $posts }}
+      <div class="post-list">
+        {{ range $posts }}
+          <article class="post-item">
+            <h3><a href="{{ .RelPermalink }}">{{ .Title }}</a></h3>
+            {{ partial "post-meta.html" . }}
+            {{ with .Description }}
+              <p>{{ . }}</p>
+            {{ else }}
+              <p>{{ .Summary | plainify | truncate 120 }}</p>
+            {{ end }}
+          </article>
+        {{ end }}
+      </div>
+    {{ else }}
+      <p class="empty-state">还没有文章。</p>
+    {{ end }}
+  </section>
+{{ end }}
