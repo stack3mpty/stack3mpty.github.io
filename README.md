@@ -1,23 +1,12 @@
 # stack3mpty.cn
 
-Hugo source for <https://stack3mpty.cn/>.
+Personal profile page — a single static, zero-dependency terminal-style page served via GitHub Pages at <https://stack3mpty.cn/>.
 
-## Local Development
+No build step: `index.html` is the whole site. `.nojekyll` disables Jekyll processing; the custom domain is set via `CNAME`.
 
-Install Hugo, then run:
-
-```sh
-hugo server -D
-```
-
-Create posts under `content/posts/`:
+## Local preview
 
 ```sh
-hugo new posts/my-post.md
+python3 -m http.server 8000
+# open http://localhost:8000
 ```
-
-## Deployment
-
-GitHub Actions builds the site and publishes the generated `public/` directory to GitHub Pages.
-
-The custom domain is configured through `static/CNAME`, which Hugo copies into the published site root.

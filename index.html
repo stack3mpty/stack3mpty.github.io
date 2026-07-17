@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>stack3mpty — backend engineer</title>
+<meta name="description" content="stack3mpty — backend engineer. Crawling platforms, distributed task scheduling, Rust & systems.">
+<meta property="og:title" content="stack3mpty — backend engineer">
+<meta property="og:description" content="From driving browsers... to building one.">
+<meta property="og:url" content="https://stack3mpty.cn">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' fill='%230a0f0a'/><text x='14' y='72' font-size='58' fill='%2333ff66' font-family='monospace'>&gt;_</text></svg>">
+<style>
+  :root {
+    --bg: #050805;
+    --fg: #33ff66;
+    --fg-dim: #1f9944;
+    --amber: #ffb000;
+    --err: #ff5555;
+    --glow: 0 0 6px rgba(51, 255, 102, .45);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "SF Mono", Menlo, Consolas, "Courier New", monospace;
+    font-size: 15px;
+    line-height: 1.55;
+    overflow: hidden;
+  }
+
+  /* ---- terminal window ---- */
+  #term {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    padding: 0 clamp(10px, 3vw, 40px) 12px;
+  }
+  #titlebar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 4px 10px;
+    color: var(--fg-dim);
+    font-size: 12px;
+    user-select: none;
+  }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot.r { background: #ff5f57; } .dot.y { background: #febc2e; } .dot.g { background: #28c840; }
+  #titlebar .title { margin-left: 10px; letter-spacing: .5px; }
+  #screen {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px 4px 20px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--fg-dim) transparent;
+  }
+  #screen::-webkit-scrollbar { width: 6px; }
+  #screen::-webkit-scrollbar-thumb { background: var(--fg-dim); }
+
+  /* ---- text styles ---- */
+  .line { white-space: pre-wrap; word-break: break-word; text-shadow: var(--glow); min-height: 1.55em; }
+  .dim { color: var(--fg-dim); }
+  .amber { color: var(--amber); text-shadow: 0 0 6px rgba(255,176,0,.4); }
+  .err { color: var(--err); }
+  .ok { color: var(--fg); }
+  a { color: var(--amber); text-decoration: none; border-bottom: 1px dashed rgba(255,176,0,.5); }
+  a:hover { background: rgba(255,176,0,.12); }
+  .prompt { color: var(--amber); }
+  .banner { color: var(--fg); text-shadow: 0 0 10px rgba(51,255,102,.7); }
+
+  /* ---- cursor & input ---- */
+  .cursor {
+    display: inline-block;
+    width: .62em; height: 1.15em;
+    background: var(--fg);
+    vertical-align: text-bottom;
+    animation: blink 1.05s steps(1) infinite;
+    box-shadow: var(--glow);
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  #hidden-input {
+    position: fixed; top: 0; left: 0;
+    width: 1px; height: 1px;
+    opacity: 0; border: none; outline: none;
+  }
+
+  /* ---- command chips ---- */
+  #chips {
+    flex: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 4px 2px;
+    user-select: none;
+  }
+  .chip {
+    border: 1px solid var(--fg-dim);
+    color: var(--fg);
+    padding: 3px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    letter-spacing: .5px;
+    background: transparent;
+    font-family: inherit;
+  }
+  .chip:hover, .chip:focus { background: rgba(51,255,102,.12); box-shadow: var(--glow); }
+
+  /* ---- CRT overlay ---- */
+  #crt {
+    pointer-events: none;
+    position: fixed; inset: 0;
+    z-index: 10;
+    background:
+      repeating-linear-gradient(
+        to bottom,
+        rgba(0,0,0,0) 0px, rgba(0,0,0,0) 2px,
+        rgba(0,0,0,.22) 3px, rgba(0,0,0,.22) 4px
+      );
+    mix-blend-mode: multiply;
+  }
+  #crt::after {
+    content: "";
+    position: absolute; inset: 0;
+    background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,.55) 100%);
+  }
+  #flicker {
+    pointer-events: none;
+    position: fixed; inset: 0;
+    z-index: 11;
+    background: rgba(51,255,102,.025);
+    animation: flicker 4s infinite steps(1);
+  }
+  @keyframes flicker {
+    0%, 91%, 94%, 98%, 100% { opacity: 1; }
+    92% { opacity: .55; }
+    96% { opacity: .8; }
+  }
+
+  @media (max-width: 640px) {
+    body { font-size: 13px; }
+    .banner { font-size: 2.4vw; }
+  }
+</style>
+</head>
+<body>
+
+<div id="term">
+  <div id="titlebar">
+    <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+    <span class="title">visitor@stack3mpty.cn — tty1 — 80×24</span>
+  </div>
+  <div id="screen" aria-live="polite"></div>
+  <div id="chips"></div>
+</div>
+
+<div id="crt"></div>
+<div id="flicker"></div>
+<input id="hidden-input" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="terminal input">
+
+<script>
+"use strict";
+
+/* ================= content (desensitized) ================= */
+
+const PROMPT = '<span class="prompt">visitor@stack3mpty.cn</span><span class="dim">:~$</span> ';
+
+const BANNER = String.raw`
+   __            __   ____
+  / /__ _  ___ _/ /__|_  /____ _  ___  ___ / /___ __
+ / _ /  ' \/ _ '/ -_) / // /  ' \/ _ \/ _ '/ __/ // /
+/_//_/_/_/_/\_,_/\__/_/ /___/_/_/_/ .__/\_,_/\__/\_, /
+                                 /_/            /___/ `.slice(1);
+
+const WHOAMI = [
+  ["", 0],
+  ["stack3mpty — backend engineer, 3 yrs in production.", 0],
+  ["", 0],
+  ["I build systems that move data:", 0],
+  ["marketing platforms by day, crawlers that outsmart", 0],
+  ["bot defenses by night.", 0],
+  ["", 0],
+  ["Currently going deeper — Rust, browser engines, OS kernels.", 0],
+  ["", 0],
+  ['<span class="amber">&gt; from driving browsers ... to building one.</span>', 0],
+  ["", 0],
+];
+
+const EXPERIENCE = [
+  ["", 0],
+  ['<span class="amber">[ ~3 YEARS ]</span> Backend Engineer', 0],
+  ["", 0],
+  ["  <span class=\"dim\"># marketing systems</span>", 0],
+  ["  * campaign / promotion services under high traffic", 0],
+  ["", 0],
+  ["  <span class=\"dim\"># crawling platform</span>", 0],
+  ["  * large-scale distributed data collection", 0],
+  ["  * browser crawler framework, built for production:", 0],
+  ["      - Node.js + TypeScript monorepo, dual drivers (Puppeteer / Playwright)", 0],
+  ["      - self-built browser context pool + coroutine-style task scheduler", 0],
+  ["      - plugin architecture: crawlers as hot-pluggable extensions", 0],
+  ["      - anti-detect: pluggable fingerprint generator, proxy tunneling", 0],
+  ["      - powering 10+ production targets behind strict anti-bot defenses", 0],
+  ["", 0],
+];
+
+const PROJECTS = {
+  "lite-task-dispatcher": {
+    desc: [
+      ['<span class="amber">lite-task-dispatcher</span> <span class="dim">[public · Java · MIT]</span>', 0],
+      ['<a href="https://github.com/stack3mpty/lite-task-dispatcher" target="_blank" rel="noopener">github.com/stack3mpty/lite-task-dispatcher</a>', 0],
+      ["", 0],
+      ["  lightweight distributed task scheduling & processing platform", 0],
+      ["    - Spring Boot 3 + Redis + PostgreSQL + Kafka", 0],
+      ["    - SQS-style visibility timeout: at-least-once delivery,", 0],
+      ["      crashed workers' tasks recovered & requeued", 0],
+      ["    - Redis + Lua token-bucket rate limiting, transactional outbox", 0],
+      ["    - exponential backoff retries w/ jitter, dead-letter state", 0],
+      ["    - load-tested: 200 RPS, p99 submit latency 44ms,", 0],
+      ["      node kill mid-test, 100% task closure", 0],
+    ],
+  },
+  "rust-browser-task-runner": {
+    desc: [
+      ['<span class="amber">rust-browser-task-runner</span> <span class="dim">[Rust]</span>', 0],
+      ["", 0],
+      ["  async browser task execution service over REST", 0],
+      ["    - axum + chromiumoxide (Chrome DevTools Protocol)", 0],
+      ["    - plugin script registry — new capability = impl one trait", 0],
+      ["    - mpsc producer-consumer queue, lock-free state via dashmap", 0],
+      ["    - browser driver abstraction, swappable backends", 0],
+    ],
+  },
+  "mini-grok": {
+    desc: [
+      ['<span class="amber">mini-grok</span> <span class="dim">[Rust]</span>', 0],
+      ["", 0],
+      ["  a small, auditable coding agent — full agent loop, no magic", 0],
+      ["    - typed tool system: capability metadata drives both", 0],
+      ["      permission approval and parallel scheduling", 0],
+      ["    - actor-model session runtime, cancellable operations", 0],
+      ["    - streaming SSE client, token-budgeted context compaction", 0],
+      ["    - kernel-level sandboxing (macOS Seatbelt)", 0],
+    ],
+  },
+  "blog_os": {
+    desc: [
+      ['<span class="amber">blog_os</span> <span class="dim">[Rust · no_std]</span>', 0],
+      ["", 0],
+      ["  an x86_64 operating system kernel from scratch", 0],
+      ["    - GDT / IDT, PIC hardware interrupts (timer + keyboard)", 0],
+      ["    - 4-level paging, physical frame allocator, kernel heap", 0],
+      ["    - custom test framework running inside QEMU", 0],
+      ["    - boots. passes tests. no_std, no fear.", 0],
+    ],
+  },
+};
+
+const PROJECT_LIST = [
+  ["", 0],
+  ['<span class="dim">drwxr-xr-x</span>  <a href="https://github.com/stack3mpty/lite-task-dispatcher" target="_blank" rel="noopener">lite-task-dispatcher</a>      <span class="dim"># distributed task scheduling · Java</span>', 0],
+  ['<span class="dim">drwx------</span>  rust-browser-task-runner     <span class="dim"># async browser tasks over CDP · Rust</span>', 0],
+  ['<span class="dim">drwx------</span>  mini-grok                   <span class="dim"># auditable coding agent · Rust</span>', 0],
+  ['<span class="dim">drwx------</span>  blog_os                     <span class="dim"># x86_64 OS kernel · Rust no_std</span>', 0],
+  ["", 0],
+  ['<span class="dim">drwxr-xr-x</span>  notes/engine-study          <span class="dim"># deep-dived a from-scratch Rust headless', 0],
+  ["                                            <span class=\"dim\">browser engine: embedded V8, own DOM tree,</span>", 0],
+  ["                                            <span class=\"dim\">CDP server — the layer below the frameworks</span>", 0],
+  ["                                            <span class=\"dim\">I drive at work.</span>", 0],
+  ["", 0],
+  ['type <span class="amber">cat &lt;project&gt;</span> for details', 0],
+  ["", 0],
+];
+
+const SKILLS = [
+  ["", 0],
+  ['<span class="amber">backend</span>   Java · Spring Boot · Redis · Kafka · PostgreSQL', 0],
+  ['<span class="amber">crawling</span>  Node.js/TS · Puppeteer · Playwright · CDP', 0],
+  ["            anti-detect fingerprints · proxy networks", 0],
+  ['<span class="amber">systems</span>   Rust · Tokio · axum · OS internals', 0],
+  ["            (paging, interrupts, allocators)", 0],
+  ["", 0],
+];
+
+const CONTACT = [
+  ["", 0],
+  ['github   <a href="https://github.com/stack3mpty" target="_blank" rel="noopener">github.com/stack3mpty</a>', 0],
+  ['mail     <a href="mailto:stack3mpty@gmail.com">stack3mpty@gmail.com</a>', 0],
+  ['web      <a href="https://stack3mpty.cn" target="_blank" rel="noopener">stack3mpty.cn</a>', 0],
+  ["", 0],
+];
+
+const HELP = [
+  ["", 0],
+  ["  <span class=\"amber\">whoami</span>        what I do", 0],
+  ["  <span class=\"amber\">experience</span>    work history (sanitized)", 0],
+  ["  <span class=\"amber\">projects</span>      things I've built — try `cat &lt;name&gt;`", 0],
+  ["  <span class=\"amber\">skills</span>        stack & tools", 0],
+  ["  <span class=\"amber\">contact</span>       where to find me", 0],
+  ["  <span class=\"amber\">clear</span>         wipe the screen", 0],
+  ["  <span class=\"amber\">sudo</span>          go ahead, try it", 0],
+  ["", 0],
+];
+
+const BOOT = [
+  ["[ <span class=\"ok\">OK</span> ] core :: init", 60],
+  ["[ <span class=\"ok\">OK</span> ] net  :: stack3mpty.cn resolved", 70],
+  ["[ <span class=\"ok\">OK</span> ] mount :: /dev/profile", 60],
+  ["[ <span class=\"ok\">OK</span> ] load :: crawler.framework v3.0", 80],
+  ["[ <span class=\"ok\">OK</span> ] load :: rust.sysroot", 60],
+  ["[ <span class=\"ok\">OK</span> ] spawn :: tty session", 70],
+  ["", 120],
+];
+
+/* ================= terminal engine ================= */
+
+const screen = document.getElementById("screen");
+const hiddenInput = document.getElementById("hidden-input");
+const chips = document.getElementById("chips");
+
+let inputLine = null;   // live prompt line element
+let bufferSpan = null;
+let buffer = "";
+let history = [];
+let histIdx = -1;
+let queue = Promise.resolve();  // serialize command execution
+let booted = false;
+
+function scrollBottom() { screen.scrollTop = screen.scrollHeight; }
+
+function addLine(html) {
+  const div = document.createElement("div");
+  div.className = "line";
+  div.innerHTML = html;
+  screen.appendChild(div);
+  scrollBottom();
+  return div;
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+/* type `html` into a line, revealing plain-text length progressively */
+async function typeLine(html, cps = 240) {
+  const div = addLine("");
+  const tmp = document.createElement("div");
+  tmp.innerHTML = html;
+  const full = tmp.textContent;
+  if (!full) { div.innerHTML = html; return; }
+  for (let i = 1; i <= full.length; i++) {
+    div.textContent = full.slice(0, i);
+    scrollBottom();
+    await sleep(1000 / cps);
+  }
+  div.innerHTML = html; // restore links/spans once fully typed
+}
+
+async function typeCmd(cmd) {
+  removeInputLine();
+  const div = addLine(PROMPT);
+  const span = document.createElement("span");
+  div.appendChild(span);
+  for (let i = 1; i <= cmd.length; i++) {
+    span.textContent = cmd.slice(0, i);
+    scrollBottom();
+    await sleep(45);
+  }
+}
+
+async function printLines(lines, typed = true) {
+  for (const [html, pause] of lines) {
+    if (typed) await typeLine(html);
+    else addLine(html);
+    if (pause) await sleep(pause);
+  }
+}
+
+/* ---- live input line ---- */
+function removeInputLine() {
+  if (inputLine) { inputLine.remove(); inputLine = null; bufferSpan = null; }
+}
+
+function showInputLine() {
+  removeInputLine();
+  inputLine = document.createElement("div");
+  inputLine.className = "line";
+  inputLine.innerHTML = PROMPT;
+  bufferSpan = document.createElement("span");
+  const cur = document.createElement("span");
+  cur.className = "cursor";
+  inputLine.appendChild(bufferSpan);
+  inputLine.appendChild(cur);
+  screen.appendChild(inputLine);
+  scrollBottom();
+}
+
+function renderBuffer() { if (bufferSpan) bufferSpan.textContent = buffer; scrollBottom(); }
+
+/* ================= command dispatch ================= */
+
+function resolve(raw) {
+  const parts = raw.trim().split(/\s+/).filter(Boolean);
+  return { cmd: (parts[0] || "").toLowerCase(), args: parts.slice(1) };
+}
+
+async function exec(raw) {
+  const { cmd, args } = resolve(raw);
+  if (!cmd) return;
+
+  switch (cmd) {
+    case "help": await printLines(HELP); break;
+    case "whoami": await printLines(WHOAMI); break;
+    case "experience": await printLines(EXPERIENCE); break;
+    case "projects": case "ls": await printLines(PROJECT_LIST); break;
+    case "skills": await printLines(SKILLS); break;
+    case "contact": case "links": await printLines(CONTACT); break;
+    case "clear": screen.innerHTML = ""; break;
+    case "cat": {
+      const name = (args[0] || "").replace(/\/$/, "");
+      if (PROJECTS[name]) {
+        await printLines([["", 0], ...PROJECTS[name].desc, ["", 0]]);
+      } else if (name) {
+        await printLines([[`cat: ${name}: no such project — try <span class="amber">projects</span>`, 0], ["", 0]]);
+      } else {
+        await printLines([["usage: cat &lt;project&gt;", 0], ["", 0]]);
+      }
+      break;
+    }
+    case "sudo":
+      await printLines([
+        ['<span class="err">visitor is not in the sudoers file.</span>', 0],
+        ['<span class="err">This incident will be reported to stack3mpty.</span>', 0],
+        ["", 0],
+      ]);
+      break;
+    case "exit": case "quit": case "logout":
+      await printLines([['<span class="dim">there is no escape. nice try though.</span>', 0], ["", 0]]);
+      break;
+    default:
+      await printLines([
+        [`sh: command not found: ${cmd} — type <span class="amber">help</span>`, 0],
+        ["", 0],
+      ]);
+  }
+}
+
+function runCommand(raw, echoType = true) {
+  queue = queue.then(async () => {
+    if (echoType) await typeCmd(raw); else { removeInputLine(); addLine(PROMPT + escapeHtml(raw)); }
+    if (raw.trim()) { history.push(raw); histIdx = history.length; }
+    buffer = "";
+    await exec(raw);
+    showInputLine();
+  });
+  return queue;
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/* ================= keyboard ================= */
+
+hiddenInput.addEventListener("input", () => { buffer = hiddenInput.value; renderBuffer(); });
+
+hiddenInput.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    const cmd = hiddenInput.value;
+    hiddenInput.value = "";
+    buffer = "";
+    runCommand(cmd, false);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    if (histIdx > 0) { histIdx--; buffer = hiddenInput.value = history[histIdx] || ""; renderBuffer(); }
+  } else if (e.key === "ArrowDown") {
+    e.preventDefault();
+    if (histIdx < history.length) { histIdx++; buffer = hiddenInput.value = history[histIdx] || ""; renderBuffer(); }
+  } else if (e.key === "l" && e.ctrlKey) {
+    e.preventDefault(); screen.innerHTML = ""; showInputLine();
+  }
+});
+
+document.addEventListener("click", () => hiddenInput.focus());
+
+/* ================= chips ================= */
+
+["whoami", "experience", "projects", "skills", "contact", "help", "clear"].forEach(c => {
+  const b = document.createElement("button");
+  b.className = "chip";
+  b.textContent = "$ " + c;
+  b.addEventListener("click", e => { e.stopPropagation(); if (booted) runCommand(c); hiddenInput.focus(); });
+  chips.appendChild(b);
+});
+
+/* ================= boot ================= */
+
+(async function boot() {
+  for (const [html, pause] of BOOT) { addLine(html); await sleep(pause); }
+  const banner = addLine("");
+  banner.classList.add("banner");
+  banner.textContent = BANNER;
+  await sleep(200);
+  await printLines([
+    ["", 0],
+    ['welcome to <span class="amber">stack3mpty.cn</span> — tty session started.', 0],
+    ['type <span class="amber">help</span> to list commands, or click one below.', 0],
+  ]);
+  booted = true;
+  showInputLine();
+  await sleep(400);
+  runCommand("whoami");
+})();
+
+hiddenInput.focus();
+</script>
+</body>
+</html>
