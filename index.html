@@ -166,23 +166,22 @@
 
 const PROMPT = '<span class="prompt">visitor@stack3mpty.cn</span><span class="dim">:~$</span> ';
 
-const BANNER = String.raw`
-      _             _    _____                 _
-  ___| |_ __ _  ___| | _|___ / _ __ ___  _ __ | |_ _   _
- / __| __/ _` + '`' + String.raw`|/ __| |/ / |_ \| '_ ` + '`' + String.raw` _ \| '_ \| __| | | |
- \__ \ || (_| | (__|   < ___) | | | | | | |_) | |_| |_| |
- |___/\__\__,_|\___|_|\_\____/|_| |_| |_| .__/ \__|\__, |
-                                        |_|        |___/ `.slice(1);
+const BANNER = (String.raw`
+         __             __  _____                 __
+   _____/ /_____ ______/ /_|__  /____ ___  ____  / /___  __
+  / ___/ __/ __ ` + "`" + String.raw`/ ___/ //_//_ </ __ ` + "`" + String.raw`__ \/ __ \/ __/ / / /
+ (__  ) /_/ /_/ / /__/ ,< ___/ / / / / / / /_/ / /_/ /_/ /
+/____/\__/\__,_/\___/_/|_/____/_/ /_/ /_/ .___/\__/\__, /
+                                       /_/        /____/ `).slice(1);
 
 const WHOAMI = [
   ["", 0],
   ["stack3mpty — backend engineer, 3 yrs in production.", 0],
   ["", 0],
   ["I build systems that move data:", 0],
-  ["marketing platforms by day, crawlers that outsmart", 0],
-  ["bot defenses by night.", 0],
-  ["", 0],
-  ["Currently going deeper — Rust, browser engines, OS kernels.", 0],
+  ["crawler backends by day — tasks built, dispatched,", 0],
+  ["collected at scale;", 0],
+  ["rust, browser engines and OS kernels by night.", 0],
   ["", 0],
   ['<span class="amber">&gt; from driving browsers ... to building one.</span>', 0],
   ["", 0],
@@ -192,17 +191,21 @@ const EXPERIENCE = [
   ["", 0],
   ['<span class="amber">[ ~3 YEARS ]</span> Backend Engineer', 0],
   ["", 0],
-  ["  <span class=\"dim\"># marketing systems</span>", 0],
-  ["  * campaign / promotion services under high traffic", 0],
+  ["  <span class=\"dim\"># crawler systems (current)</span>", 0],
+  ["  * crawler backend service — the task pipeline side:", 0],
+  ["      - build tasks, workers claim & execute,", 0],
+  ["        results uploaded back — full task lifecycle", 0],
+  ["      - runs independent from the browser framework below", 0],
   ["", 0],
-  ["  <span class=\"dim\"># crawling platform</span>", 0],
-  ["  * large-scale distributed data collection", 0],
-  ["  * browser crawler framework, built for production:", 0],
+  ["  * browser crawler framework (production):", 0],
   ["      - Node.js + TypeScript monorepo, dual drivers (Puppeteer / Playwright)", 0],
   ["      - self-built browser context pool + coroutine-style task scheduler", 0],
   ["      - plugin architecture: crawlers as hot-pluggable extensions", 0],
   ["      - anti-detect: pluggable fingerprint generator, proxy tunneling", 0],
   ["      - powering 10+ production targets behind strict anti-bot defenses", 0],
+  ["", 0],
+  ["  <span class=\"dim\"># marketing systems (earlier)</span>", 0],
+  ["  * campaign / promotion services under high traffic", 0],
   ["", 0],
 ];
 
