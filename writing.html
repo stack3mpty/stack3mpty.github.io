@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Writing — stack3mpty</title>
+<meta name="description" content="stack3mpty 的想法与文章。">
+<style>
+  :root { --bg: #050805; --fg: #33ff66; --dim: #1f9944; --amber: #ffb000; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.8 "SF Mono", Menlo, Consolas, "Courier New", monospace;
+  }
+  main { width: min(760px, calc(100% - 32px)); margin: 48px auto 96px; }
+  a { color: var(--amber); text-decoration: none; border-bottom: 1px dashed currentColor; }
+  a:hover { background: rgba(255, 176, 0, .12); }
+  header, article { margin-bottom: 64px; }
+  h1, h2, h3 { color: var(--amber); line-height: 1.35; }
+  h1 { font-size: 24px; }
+  h2 { font-size: 20px; margin-bottom: 4px; }
+  h3 { font-size: 16px; margin-top: 32px; }
+  time, .dim { color: var(--dim); }
+  nav ul { padding-left: 20px; }
+  article { scroll-margin-top: 24px; }
+  article p, article li { color: #b8d9bf; }
+  article li { margin-bottom: 8px; }
+  strong { color: var(--fg); }
+  code { color: var(--amber); }
+  pre {
+    overflow-x: auto;
+    padding: 20px;
+    border: 1px solid var(--dim);
+    color: var(--fg);
+    line-height: 1.55;
+  }
+  @media (max-width: 640px) { main { margin-top: 24px; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <a href="index.html">← cd ~</a>
+    <h1>~/writing</h1>
+    <p class="dim">想法、笔记与文章。</p>
+  </header>
+
+  <nav aria-label="文章列表">
+    <ul>
+      <li><a href="#codex-concurrency">2026-08-31　Codex的并发模型设计</a></li>
+      <li><a href="#about">2026-08-31　关于这个写作页</a></li>
+    </ul>
+  </nav>
+
+  <article id="codex-concurrency">
+    <h2>Codex的并发模型设计</h2>
+    <time datetime="2026-08-31">2026-08-31</time>
+
+    <p>Codex 的并发模型可以概括为：<strong>Tokio 异步运行时 + 每个 Session 串行控制 + Turn 内异步并发</strong>。</p>
+
+    <pre aria-label="Codex 并发模型流程图">多个 CodexThread 并发运行
+        │
+每个 CodexThread 对应一个 Session
+        │
+submission channel
+        ▼
+submission_loop 串行处理控制命令
+        │
+        ├── 启动 RegularTask
+        ├── steer 当前 Turn
+        ├── interrupt
+        └── approval / tool response
+                │
+                ▼
+          run_turn 异步循环
+                │
+        模型请求 → 工具执行 → 再次请求模型</pre>
+
+    <h3>分层的并发结构</h3>
+
+    <p>Codex 没有让所有操作直接竞争同一份状态，而是把并发拆成了几个层次。</p>
+
+    <ul>
+      <li><strong>Thread 之间并发：</strong>不同的 <code>CodexThread</code> 和 <code>Session</code> 可以同时运行，彼此不需要等待。</li>
+      <li><strong>Session 内命令串行：</strong><code>submission_loop</code> 从 <code>rx_sub</code> 中逐个读取 <code>Submission</code>，避免 start、steer、cancel 等控制操作发生状态竞争。</li>
+      <li><strong>任务异步执行：</strong><code>RegularTask</code> 通过 <code>tokio::spawn</code> 执行，不会阻塞 <code>submission_loop</code>。因此模型运行期间，Session 仍然能够接收 steer 或取消命令。</li>
+      <li><strong>Turn 内工具并行：</strong>当模型一次返回多个允许并行的工具调用时，这些工具可以并发执行，从而缩短一次 Turn 的整体耗时。</li>
+    </ul>
+
+    <h3>共享状态与消息通道</h3>
+
+    <p>跨异步任务共享的对象通过 <code>Arc</code> 持有，<code>active_turn</code>、输入队列等可变状态则由 <code>Mutex</code> 或 <code>RwLock</code> 保护。锁负责局部的数据安全，而 Session 的串行控制循环负责更高层的状态一致性。</p>
+
+    <p>Channel 将 Session 与外部调用方解耦：</p>
+
+    <ul>
+      <li><code>tx_sub / rx_sub</code>：外部向 Session 发送控制命令。</li>
+      <li><code>tx_event / rx_event</code>：Session 向外部发送运行事件。</li>
+      <li><code>oneshot</code>：等待某个命令的单次处理结果。</li>
+    </ul>
+
+    <h3>取消机制</h3>
+
+    <p>取消操作通过 cancellation token 通知正在运行的异步任务停止。它不要求控制循环同步等待任务退出，因此 Session 可以继续处理后续消息，同时由任务在合适的检查点响应取消信号。</p>
+
+    <h3>像 Actor，但不是纯 Actor</h3>
+
+    <p>从结构上看，这套设计很接近 Actor 模型：</p>
+
+    <ul>
+      <li><code>Session</code> ≈ Actor</li>
+      <li><code>Submission channel</code> ≈ Actor mailbox</li>
+      <li><code>submission_loop</code> ≈ 消息处理循环</li>
+      <li><code>RegularTask</code> ≈ Actor 启动的后台异步任务</li>
+    </ul>
+
+    <p>但它不是纯 Actor：后台任务仍然会通过 <code>Arc</code>、锁和 channel 与 Session 协作，并且一个 Turn 内部还可以继续派生并发工具任务。</p>
+
+    <p><strong>一句话总结：</strong>Codex 用串行的 Session 控制循环保证状态一致性，用异步 Task 和并行工具执行保证吞吐量。</p>
+  </article>
+
+  <article id="about">
+    <h2>关于这个写作页</h2>
+    <time datetime="2026-08-31">2026-08-31</time>
+    <p>这里没有博客框架，也没有构建步骤。文章和主页一样，只是 GitHub Pages 直接托管的 HTML。</p>
+    <p>以后新增文章，只需要复制这个 <code>&lt;article&gt;</code> 区块，修改标题、日期和正文，再在上面的列表以及主页的 <code>WRITING</code> 中各加一个链接。</p>
+  </article>
+
+  <!-- 新文章模板：复制到上方并修改，同时在 nav 和首页 WRITING 中添加链接。
+  <article id="article-slug">
+    <h2>文章标题</h2>
+    <time datetime="2026-09-01">2026-09-01</time>
+    <p>正文。</p>
+  </article>
+  -->
+</main>
+</body>
+</html>

@@ -295,12 +295,24 @@ const CONTACT = [
   ["", 0],
 ];
 
+const WRITING = [
+  ["", 0],
+  ['<span class="amber">writing/</span>', 0],
+  ["", 0],
+  ['  <a href="writing.html#codex-concurrency" target="_blank" rel="noopener">2026-08-31  Codex的并发模型设计</a>', 0],
+  ['  <a href="writing.html#about" target="_blank" rel="noopener">2026-08-31  关于这个写作页</a>', 0],
+  ["", 0],
+  ['open <a href="writing.html" target="_blank" rel="noopener">all writing →</a>', 0],
+  ["", 0],
+];
+
 const HELP = [
   ["", 0],
   ["  <span class=\"amber\">whoami</span>        what I do", 0],
   ["  <span class=\"amber\">experience</span>    work history (sanitized)", 0],
   ["  <span class=\"amber\">projects</span>      things I've built — try `cat &lt;name&gt;`", 0],
   ["  <span class=\"amber\">skills</span>        stack & tools", 0],
+  ["  <span class=\"amber\">writing</span>       thoughts & articles", 0],
   ["  <span class=\"amber\">contact</span>       where to find me", 0],
   ["  <span class=\"amber\">clear</span>         wipe the screen", 0],
   ["  <span class=\"amber\">sudo</span>          go ahead, try it", 0],
@@ -417,6 +429,7 @@ async function exec(raw) {
     case "experience": await printLines(EXPERIENCE); break;
     case "projects": case "ls": await printLines(PROJECT_LIST); break;
     case "skills": await printLines(SKILLS); break;
+    case "writing": case "articles": case "notes": await printLines(WRITING); break;
     case "contact": case "links": await printLines(CONTACT); break;
     case "clear": screen.innerHTML = ""; break;
     case "cat": {
@@ -488,7 +501,7 @@ document.addEventListener("click", () => hiddenInput.focus());
 
 /* ================= chips ================= */
 
-["whoami", "experience", "projects", "skills", "contact", "help", "clear"].forEach(c => {
+["whoami", "experience", "projects", "skills", "writing", "contact", "help", "clear"].forEach(c => {
   const b = document.createElement("button");
   b.className = "chip";
   b.textContent = "$ " + c;
