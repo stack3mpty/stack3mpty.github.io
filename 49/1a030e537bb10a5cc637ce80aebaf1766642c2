@@ -1,0 +1,23 @@
+writing/index.html
+  s_fcfe95cbe5157a::t_7fac341001ba32 20
+writing/codex-sessionio-vs-session.html
+  s_fcfe95cbe5157a::t_7fac341001ba32 1-107
+index.html
+  s_fcfe95cbe5157a::t_7fac341001ba32 302
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "491a030e537bb10a5cc637ce80aebaf1766642c2",
+  "prompts": {},
+  "sessions": {
+    "s_fcfe95cbe5157a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0569d-f005-70a0-9f02-25d3792e5780",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "c.kai <c.kai@trip.com>"
+    }
+  }
+}
