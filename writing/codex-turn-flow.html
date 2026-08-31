@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>一次完整的Codex调用流程 — stack3mpty</title>
+<meta name="description" content="从用户输入进入 Submission 队列，到模型与工具循环，再到 TurnComplete 事件的一次完整 Codex 调用流程。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <a href="index.html">← all writing</a>
+  </header>
+
+  <article>
+    <h1>一次完整的Codex调用流程</h1>
+    <time datetime="2026-08-31">2026-08-31</time>
+
+    <p>一次 Codex 调用从用户提交输入开始，经过 Session 控制循环、Turn 任务和模型工具循环，最终以 <code>TurnComplete</code> 事件结束。整条链路可以记成：</p>
+
+    <pre aria-label="Codex 完整调用链路">用户输入
+  → Submission 队列
+  → 决定 Start 或 Steer
+  → RegularTask
+  → run_turn
+  → 模型与工具循环
+  → TurnComplete 事件</pre>
+
+    <h2>1. 用户提交输入</h2>
+
+    <p>上层从 <code>CodexThread</code> 发起调用：</p>
+
+    <pre><code>thread.start_or_steer_turn(request).await</code></pre>
+
+    <p>它最终会调用 <code>SessionIo</code>：</p>
+
+    <pre><code>self.io.submit_turn_input(
+    request,
+    TurnInputMode::StartOrSteer,
+).await</code></pre>
+
+    <p><code>SessionIo</code> 会生成 submission ID，创建一个 oneshot 回复通道，再把输入包装成 <code>Submission</code>：</p>
+
+    <pre><code>Submission {
+    id,
+    op: Op::TurnInput {
+        request,
+        mode,
+        reply,
+    },
+}</code></pre>
+
+    <p>随后，Submission 通过 <code>tx_sub</code> 被发送给 Session：</p>
+
+    <pre>CodexThread
+    ↓ tx_sub
+Submission Queue
+    ↓ rx_sub
+submission_loop</pre>
+
+    <h2>2. submission_loop 接收命令</h2>
+
+    <p><code>submission_loop</code> 是整个 Session 的控制循环。它从 <code>rx_sub</code> 中逐个读取命令，并按操作类型分发：</p>
+
+    <pre><code>while let Ok(submission) = rx_sub.recv().await {
+    match submission.op {
+        Op::TurnInput { ... } =&gt; ...
+        Op::Interrupt =&gt; ...
+        Op::Shutdown =&gt; ...
+        ...
+    }
+}</code></pre>
+
+    <p>收到 <code>Op::TurnInput</code> 后，控制循环调用 <code>turn_input::handle(...)</code>，由它决定这次输入应该 Start 还是 Steer。</p>
+
+    <h2>3. 决定 Start 或 Steer</h2>
+
+    <p><code>StartOrSteer</code> 会先通过 <code>session.steer_input(...).await</code>，尝试把新输入注入当前活动 Turn。这里有三种结果：</p>
+
+    <ul>
+      <li><strong>存在可 steer 的 Regular Turn：</strong>输入加入 <code>InputQueue</code>，返回 <code>Steered</code>。</li>
+      <li><strong>没有活动 Turn：</strong>创建 <code>TurnContext</code> 并启动 <code>RegularTask</code>，返回 <code>Started</code>。</li>
+      <li><strong>存在 Review、Compact 等不可 steer 的 Turn：</strong>返回 <code>NotSubmitted</code>。</li>
+    </ul>
+
+    <p>如果结果是 <code>Steered</code>，系统不会创建新 Turn，新输入由正在运行的 <code>RegularTask</code> 消费。如果结果是 <code>Started</code>，则进入任务启动流程。</p>
+
+    <h2>4. 启动 RegularTask</h2>
+
+    <p>Core 创建 <code>RegularTask</code>，然后交给 Session：</p>
+
+    <pre><code>session.spawn_task(
+    turn_context,
+    input,
+    RegularTask::new(),
+).await;</code></pre>
+
+    <p><code>spawn_task()</code> 最终进入 <code>start_task()</code>，主要完成这些工作：</p>
+
+    <ul>
+      <li>把当前 Turn 注册为 <code>active_turn</code>。</li>
+      <li>创建 <code>CancellationToken</code>。</li>
+      <li>记录 Turn 启动时间。</li>
+      <li>触发扩展生命周期。</li>
+      <li>创建 tracing span。</li>
+      <li>使用 <code>tokio::spawn</code> 启动后台任务。</li>
+    </ul>
+
+    <p>后台任务执行 <code>RegularTask::run(...)</code>。因此，<code>start_or_steer_turn()</code> 不会等待整个 Turn 完成，只会等待 Core 给出“已启动”或“已 steer”的处理结果。</p>
+
+    <h2>5. RegularTask 驱动 Turn</h2>
+
+    <p><code>RegularTask::run()</code> 首先发出 <code>EventMsg::TurnStarted</code>，然后尝试取得已经预热的 <code>ModelClientSession</code>，最后调用 <code>run_turn(...)</code>。</p>
+
+    <p>它的外层循环可以简化为：</p>
+
+    <pre><code>loop {
+    let last_message = run_turn(...).await?;
+
+    if terminal_error {
+        return Ok(last_message);
+    }
+
+    if !has_pending_input {
+        return Ok(last_message);
+    }
+}</code></pre>
+
+    <p>这层循环用于处理 Turn 即将结束时新到达的 steer 输入。如果结束边界出现了新输入，任务会继续运行，而不是过早退出。</p>
+
+    <h2>6. run_turn() 执行核心 Agent Loop</h2>
+
+    <p><code>run_turn()</code> 是核心 Agent Loop。它先读取用户输入和对话历史，构造 <code>StepContext</code> 与 Prompt，再调用 Responses API 并处理模型的流式输出。</p>
+
+    <pre>读取用户输入和历史
+    ↓
+构造 StepContext
+    ↓
+构造发给模型的 Prompt
+    ↓
+调用 Responses API
+    ↓
+处理模型流式输出</pre>
+
+    <h3>模型给出最终回答</h3>
+
+    <p>当模型输出 Assistant Message，不再请求工具，并且没有 pending input 时，<code>run_turn()</code> 就可以结束。</p>
+
+    <h3>模型发起工具调用</h3>
+
+    <p>当模型输出 Tool Call 时，<code>ToolRouter</code> 会找到对应工具，执行 shell、MCP、<code>apply_patch</code> 等操作，再把 Tool Result 写入对话历史，随后重新请求模型。</p>
+
+    <pre>模型输出 Tool Call
+    ↓
+ToolRouter 找到对应工具
+    ↓
+执行工具
+    ↓
+把 Tool Result 写入对话历史
+    ↓
+再次请求模型</pre>
+
+    <p>工具执行后必须再次请求模型，因为工具结果只是原始观察，例如退出码和标准输出。工具本身不知道应该如何回答用户，模型还需要根据结果决定：</p>
+
+    <ul>
+      <li>是否需要继续调用工具。</li>
+      <li>是否需要修复错误。</li>
+      <li>任务是否已经完成。</li>
+      <li>最终应该如何组织回答。</li>
+    </ul>
+
+    <p>所以，核心循环实际上是：</p>
+
+    <pre>模型
+  → 工具调用
+  → 工具结果
+  → 模型
+  → 工具调用
+  → 工具结果
+  → 模型最终回答</pre>
+
+    <h2>7. run_turn() 返回</h2>
+
+    <p>当模型不再要求 follow-up，并且 <code>InputQueue</code> 中没有 pending input 时，<code>run_turn()</code> 返回：</p>
+
+    <pre><code>Ok(Some(last_agent_message))</code></pre>
+
+    <p><code>RegularTask</code> 会在结束前再检查一次是否出现了新输入。确认没有新输入后，它也返回 <code>Ok(last_agent_message)</code>。</p>
+
+    <h2>8. 发出 TurnComplete</h2>
+
+    <p><code>start_task()</code> 创建的后台包装任务拿到 <code>RegularTask::run()</code> 的结果后，会统一完成收尾工作：</p>
+
+    <ul>
+      <li>flush rollout。</li>
+      <li>清理 Task 状态。</li>
+      <li>调用任务结束处理。</li>
+      <li>触发 Turn 扩展生命周期。</li>
+      <li>构造并发送 <code>EventMsg::TurnComplete</code>。</li>
+    </ul>
+
+    <pre><code>EventMsg::TurnComplete(TurnCompleteEvent {
+    turn_id,
+    last_agent_message,
+    error,
+    ...
+})</code></pre>
+
+    <p>事件通过 Session 的 <code>tx_event</code> 发送出去，最终到达客户端：</p>
+
+    <pre>Session
+    ↓ tx_event
+Event Queue
+    ↓ rx_event
+CodexThread::next_event()
+    ↓
+App Server listener
+    ↓
+客户端</pre>
+
+    <p><strong>关键点：</strong>最终的 <code>TurnComplete</code> 不是由 <code>run_turn()</code> 直接发送，而是由 Session 的任务生命周期管理代码在 <code>RegularTask</code> 结束后统一发出。</p>
+
+    <p><strong>一句话总结：</strong>Codex 把一次调用拆成命令接收、Turn 调度、Agent Loop 和生命周期收尾四层；Submission channel 负责输入，RegularTask 负责执行，模型与工具循环负责完成任务，TurnComplete 负责把最终状态交还给客户端。</p>
+  </article>
+</main>
+</body>
+</html>
