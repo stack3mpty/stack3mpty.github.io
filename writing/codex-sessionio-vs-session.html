@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Codex的SessionIO和Session的区别 — stack3mpty</title>
+<meta name="description" content="SessionIo 与 Session 如何分离外部通信端点和内部运行状态，以及这种设计如何让 Session 后台循环可靠退出。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <a href="index.html">← all writing</a>
+  </header>
+
+  <article>
+    <h1>Codex的SessionIO和Session的区别</h1>
+    <time datetime="2026-08-31">2026-08-31</time>
+
+    <p><code>SessionIo</code> 和 <code>Session</code> 分离，本质上是把<strong>外部通信端点</strong>和<strong>内部运行状态</strong>分开。</p>
+
+    <pre aria-label="SessionIo 与 Session 的通信关系">外部 CodexThread                    内部 Session
+┌─────────────────┐              ┌─────────────────┐
+│ SessionIo       │              │ Session         │
+│ tx_sub ─────────┼─────────────→│ rx_sub / loop   │
+│ rx_event ←──────┼──────────────│ tx_event        │
+│ status receiver │              │ status sender   │
+└─────────────────┘              └─────────────────┘</pre>
+
+    <h2>1. 两者的职责不同</h2>
+
+    <p><code>SessionIo</code> 只保存通信与生命周期端点：</p>
+
+    <pre><code>tx_sub
+rx_event
+agent_status
+session_loop_termination</code></pre>
+
+    <p><code>Session</code> 则保存真正的运行状态：</p>
+
+    <pre><code>history
+active_turn
+input_queue
+services
+tx_event</code></pre>
+
+    <p>可以把两者理解为客户端接口与服务端实现的关系：</p>
+
+    <pre><code>SessionIo = Session 的客户端接口
+Session   = Session 的服务端实现</code></pre>
+
+    <p>外部的 <code>CodexThread</code> 不需要直接接触 Session 内部状态，只需要持有 <code>SessionIo</code>，通过 channel 提交命令、接收事件和观察状态。</p>
+
+    <h2>2. 让 submission loop 能正常关闭</h2>
+
+    <p>这是把 <code>SessionIo</code> 从 <code>Session</code> 中分离出来最重要的原因。</p>
+
+    <p><code>submission_loop</code> 大致是一个持续接收命令的循环：</p>
+
+    <pre><code>while let Ok(submission) = rx_sub.recv().await {
+    // 处理命令
+}</code></pre>
+
+    <p>当所有外部 <code>tx_sub</code> 都被销毁后，<code>recv()</code> 返回错误，循环自然结束。</p>
+
+    <p>如果 <code>Session</code> 自己也持有 <code>tx_sub</code>，生命周期就会形成自我维持：</p>
+
+    <pre>submission_loop 持有 Arc&lt;Session&gt;
+Session 持有 tx_sub
+tx_sub 永远不全部销毁
+rx_sub 永远不关闭
+submission_loop 永远不结束</pre>
+
+    <p>即使外部的 <code>CodexThread</code> 已经被销毁，Session 内部仍保留着一个 sender，receiver 就无法感知所有发送方已经离开。</p>
+
+    <p>分离以后，生命周期可以沿着 channel 的关闭方向自然结束：</p>
+
+    <pre>CodexThread / SessionIo 被销毁
+    ↓
+tx_sub 全部销毁
+    ↓
+rx_sub 关闭
+    ↓
+submission_loop 退出
+    ↓
+释放 Arc&lt;Session&gt;</pre>
+
+    <p>这样不需要额外设计一套“强制关闭循环”的状态协议。对象所有权和 channel 的关闭语义本身，就能驱动后台任务退出。</p>
+
+    <h2>3. 明确通信的读写方向</h2>
+
+    <p>拆分后的接口也让数据流向变得非常清楚：</p>
+
+    <ul>
+      <li>外部只能通过 <code>tx_sub</code> 向 Session 提交命令。</li>
+      <li>Session 只能通过 <code>tx_event</code> 向外发送事件。</li>
+      <li>外部通过 <code>rx_event</code> 接收事件。</li>
+      <li>外部只能观察 <code>agent_status</code>，不能随意修改内部状态。</li>
+    </ul>
+
+    <p>这条边界限制了状态的修改入口：外部只能发消息，真正的状态变更由 Session 的控制循环串行完成。它既减少了状态竞争，也让 Session 的内部实现可以独立演进。</p>
+
+    <p><strong>一句话总结：</strong><code>SessionIo</code> 是 <code>Session</code> 的外部通信端点；分离它主要是为了明确通信边界，并让 channel 关闭能够可靠地驱动 Session 后台循环退出。</p>
+  </article>
+</main>
+</body>
+</html>
