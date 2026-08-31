@@ -1,0 +1,25 @@
+index.html
+  s_fcfe95cbe5157a::t_41e374b1c90f2f 298-301,303-308,315,432,504
+  s_fcfe95cbe5157a::t_c1767ce5469d9a 302
+writing.html
+  s_fcfe95cbe5157a::t_c1767ce5469d9a 21,24,28-30,32-38,52,56-122
+  s_fcfe95cbe5157a::t_41e374b1c90f2f 1-20,22-23,25-27,31,39-51,53-55,123-140
+README.md
+  s_fcfe95cbe5157a::t_41e374b1c90f2f 5-9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "1b7822708ac008d05829fe47cbda8420f9475da6",
+  "prompts": {},
+  "sessions": {
+    "s_fcfe95cbe5157a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0569d-f005-70a0-9f02-25d3792e5780",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "c.kai <c.kai@trip.com>"
+    }
+  }
+}
