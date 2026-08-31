@@ -2,11 +2,11 @@
 
 Personal profile page — a single static, zero-dependency terminal-style page served via GitHub Pages at <https://stack3mpty.cn/>.
 
-No build step: `index.html` is the terminal-style homepage and `writing.html` holds the articles. `.nojekyll` disables Jekyll processing; the custom domain is set via `CNAME`.
+No build step: `index.html` is the terminal-style homepage and `writing/` holds the article index and individual article pages. `.nojekyll` disables Jekyll processing; the custom domain is set via `CNAME`.
 
 ## Add an article
 
-Copy the commented `<article>` template in `writing.html`, then add its anchor link to the list in that file and to `WRITING` in `index.html`.
+Copy an existing article page in `writing/`, then add its link to `writing/index.html` and to `WRITING` in `index.html`.
 
 ## Local preview
 
