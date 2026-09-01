@@ -20,6 +20,9 @@ article p, article li { color: #b8d9bf; }
 article li { margin-bottom: 8px; }
 strong { color: var(--fg); }
 code { color: var(--amber); }
+blockquote { margin-left: 0; padding-left: 20px; border-left: 3px solid var(--dim); }
+table { display: block; overflow-x: auto; border-collapse: collapse; color: #b8d9bf; }
+th, td { padding: 8px 12px; border: 1px solid var(--dim); text-align: left; white-space: nowrap; }
 pre {
   overflow-x: auto;
   padding: 20px;

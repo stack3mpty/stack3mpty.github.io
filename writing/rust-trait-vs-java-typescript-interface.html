@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rust Trait 设计理解：对比 Java Interface 与 TypeScript Interface — stack3mpty</title>
+<meta name="description" content="从能力约束、静态与动态分派、结构类型等角度理解 Rust Trait、Java Interface 和 TypeScript Interface 的区别。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <a href="index.html">← all writing</a>
+  </header>
+
+  <article>
+    <h1>Rust Trait 设计理解：对比 Java Interface 与 TypeScript Interface</h1>
+    <time datetime="2026-09-01">2026-09-01</time>
+
+    <p>Rust 的 <code>trait</code> 看起来很像 Java 的 <code>interface</code>，也有点像 TypeScript 的 <code>interface</code>，但三者背后的设计思路并不完全一样。</p>
+
+    <p>理解 Rust Trait，最重要的一句话是：</p>
+
+    <blockquote><p><strong>Trait 首先描述“一个类型具有什么能力”，而不是“一个对象属于什么接口层级”。</strong></p></blockquote>
+
+    <h2>1. Trait 到底是什么</h2>
+
+    <pre><code>trait Display {
+    fn display(&amp;self);
+}</code></pre>
+
+    <p>它表示任何实现了 <code>Display</code> 的类型，都具有“可以被显示”的能力。例如：</p>
+
+    <pre><code>struct User;
+
+impl Display for User {
+    fn display(&amp;self) {
+        println!("user");
+    }
+}</code></pre>
+
+    <p><code>User: Display</code> 表达的是：<code>User</code> 满足 <code>Display</code> 这个能力约束。</p>
+
+    <p>Rust 中常见的 <code>Clone</code>、<code>Copy</code>、<code>Display</code>、<code>Debug</code>、<code>Iterator</code>、<code>Read</code>、<code>Write</code>、<code>Hash</code>、<code>Ord</code>、<code>Send</code> 和 <code>Sync</code>，本质上都在描述“这个类型能做什么”。</p>
+
+    <h2>2. Rust Trait 和 Java Interface 的区别</h2>
+
+    <p>Java 中常见的写法是：</p>
+
+    <pre><code>interface Storage {
+    void save(String data);
+}
+
+class RedisStorage implements Storage {
+    public void save(String data) {}
+}
+
+void process(Storage storage) {
+    storage.save("hello");
+}</code></pre>
+
+    <p>Java 的 <code>interface</code> 很容易形成一种“抽象类型与实现类层级”的思维：</p>
+
+    <pre>Storage
+   ↑
+RedisStorage
+MysqlStorage</pre>
+
+    <p>因此，Java interface 经常与面向对象、子类型、依赖倒置、动态多态和虚函数调用联系在一起。</p>
+
+    <p>Rust 更常见的写法是：</p>
+
+    <pre><code>fn process&lt;T: Storage&gt;(storage: T) {
+    storage.save("hello");
+}</code></pre>
+
+    <p>这里不是说 <code>T</code> 是 <code>Storage</code> 的子类，而是说 <code>T</code> 是某个具体类型，并且它实现了 <code>Storage</code>。Rust 更强调“类型 + 能力约束”，而不是“接口 + 实现类层级”。</p>
+
+    <h2>3. Rust 为什么经常使用泛型 + Trait</h2>
+
+    <pre><code>fn print&lt;T: Display&gt;(value: T) {
+    value.display();
+}</code></pre>
+
+    <p>如果 <code>User</code> 和 <code>Product</code> 都实现了 <code>Display</code>，就可以分别调用 <code>print(user)</code> 与 <code>print(product)</code>。编译器知道每次调用的具体类型，通常会通过单态化生成接近 <code>print_user()</code> 和 <code>print_product()</code> 的机器代码。</p>
+
+    <pre>Trait + Generic
+      ↓
+静态多态
+      ↓
+编译期确定类型
+      ↓
+单态化</pre>
+
+    <p>这是 Rust zero-cost abstraction 的重要基础：代码保持抽象，但运行时不一定需要付出虚函数调用的成本。</p>
+
+    <h2>4. 抽象不等于动态多态</h2>
+
+    <p>从 Java 转向 Rust 时，一个重要的思维变化是：抽象和动态分派是两个独立的问题。</p>
+
+    <pre>                 抽象
+                  │
+        ┌─────────┴─────────┐
+        │                   │
+     编译期抽象          运行时抽象
+        │                   │
+Generic + Trait         dyn Trait
+        │                   │
+静态分派               动态分派</pre>
+
+    <p>例如 <code>fn sort&lt;T: Ord&gt;(data: &amp;mut [T])</code> 不关心 <code>T</code> 是 <code>i32</code>、<code>String</code> 还是 <code>User</code>，但真正调用 <code>sort::&lt;i32&gt;(...)</code> 时，编译器完全知道具体类型。</p>
+
+    <h2>5. dyn Trait 才更像 Java Interface</h2>
+
+    <pre><code>trait Animal {
+    fn speak(&amp;self);
+}
+
+fn speak_static&lt;T: Animal&gt;(animal: &amp;T) {
+    animal.speak();
+}
+
+fn speak_dynamic(animal: &amp;dyn Animal) {
+    animal.speak();
+}</code></pre>
+
+    <p>泛型版本是静态分派，而 <code>&amp;dyn Animal</code> 才是动态分派：这里有一个实现了 <code>Animal</code> 的对象，但运行时才知道它到底是 <code>Dog</code> 还是 <code>Cat</code>。</p>
+
+    <p>Trait object 通常通过数据指针和 vtable 指针找到对应的 <code>Dog::speak</code> 或 <code>Cat::speak</code>。因此，<code>dyn Trait</code> 更接近 Java interface 典型的动态多态。</p>
+
+    <h2>6. Trait 和 dyn Trait 的语法区别</h2>
+
+    <h3>Trait 作为泛型约束</h3>
+
+    <pre><code>fn foo&lt;T: Animal&gt;(x: T)
+fn foo(x: impl Animal)</code></pre>
+
+    <p>它表达“某个具体类型实现了 <code>Animal</code>”，具体类型在编译期可知。</p>
+
+    <h3>dyn Trait 作为类型</h3>
+
+    <pre><code>fn foo(x: &amp;dyn Animal)
+fn foo(x: Box&lt;dyn Animal&gt;)</code></pre>
+
+    <p>它表达“运行时这里存在某个 <code>Animal</code>，但具体类型可能不同”。简单记：<code>T: Animal</code> 中的 <code>Animal</code> 是类型约束，而 <code>Box&lt;dyn Animal&gt;</code> 中的 <code>dyn Animal</code> 是类型。</p>
+
+    <h2>7. 为什么经常看到 Box&lt;dyn Trait&gt;</h2>
+
+    <p>通常不能直接写 <code>let animal: dyn Animal;</code>，因为 <code>Dog</code>、<code>Cat</code> 和 <code>Tiger</code> 的大小可能完全不同，而 <code>dyn Animal</code> 在编译期不知道具体对象的大小。</p>
+
+    <p>所以，Trait object 通常通过固定大小的指针间接保存：</p>
+
+    <pre><code>&amp;dyn Animal
+Box&lt;dyn Animal&gt;
+Arc&lt;dyn Animal&gt;
+Rc&lt;dyn Animal&gt;</code></pre>
+
+    <pre><code>let animal: Box&lt;dyn Animal&gt; = Box::new(Dog);</code></pre>
+
+    <p><code>Box</code> 指向真正的 <code>Dog</code> 数据，同时携带用于 <code>Animal</code> 动态分派的 vtable 信息。</p>
+
+    <h2>8. impl Trait 和 dyn Trait 的区别</h2>
+
+    <pre><code>fn create() -&gt; impl Animal {
+    Dog
+}</code></pre>
+
+    <p><code>impl Animal</code> 表示返回某个实现了 <code>Animal</code> 的具体类型，只是不把这个类型暴露给调用者。具体类型对程序员隐藏，但编译器仍然知道它是 <code>Dog</code>，所以它仍属于静态抽象。</p>
+
+    <p>下面这种写法通常不成立：</p>
+
+    <pre><code>fn create(flag: bool) -&gt; impl Animal {
+    if flag { Dog } else { Cat }
+}</code></pre>
+
+    <p>因为一个 <code>impl Trait</code> 返回值必须对应同一个确定的具体类型。如果确实需要在运行时决定，可以使用：</p>
+
+    <pre><code>fn create(flag: bool) -&gt; Box&lt;dyn Animal&gt; {
+    if flag {
+        Box::new(Dog)
+    } else {
+        Box::new(Cat)
+    }
+}</code></pre>
+
+    <pre>impl Trait = 具体类型唯一，只是隐藏起来
+dyn Trait  = 具体类型在运行时真的可能变化</pre>
+
+    <h2>9. 容器是理解 dyn Trait 最好的例子</h2>
+
+    <p><code>Vec&lt;T&gt;</code> 要求所有元素都是同一个具体类型，因此 <code>Vec&lt;Dog&gt;</code> 只能放 <code>Dog</code>。而下面的异构集合可以同时保存不同类型：</p>
+
+    <pre><code>let animals: Vec&lt;Box&lt;dyn Animal&gt;&gt; = vec![
+    Box::new(Dog),
+    Box::new(Cat),
+];</code></pre>
+
+    <p>因为这些元素对外统一为 <code>Box&lt;dyn Animal&gt;</code>，所以 <code>dyn Trait</code> 很适合插件系统、不同后端实现、GUI Widget、异构对象集合和运行时配置切换。</p>
+
+    <h2>10. 什么时候用泛型，什么时候用 dyn Trait</h2>
+
+    <p>一个实用的判断方法是：<strong>具体类型什么时候才能确定？</strong></p>
+
+    <p>如果编译时就能确定，优先使用 <code>T: Trait</code> 或 <code>impl Trait</code>：</p>
+
+    <pre><code>fn process&lt;T: Storage&gt;(storage: T)
+BrowserPool&lt;ChromiumBackend&gt;</code></pre>
+
+    <p>如果只有运行时才能确定，则使用 <code>dyn Trait</code>：</p>
+
+    <pre><code>let backend: Box&lt;dyn BrowserBackend&gt; =
+    match config.backend {
+        Chromium =&gt; Box::new(ChromiumBackend::new()),
+        Playwright =&gt; Box::new(PlaywrightBackend::new()),
+    };</code></pre>
+
+    <pre>编译期确定 → T: Trait / impl Trait
+运行时确定 → dyn Trait</pre>
+
+    <h2>11. Rust Trait 和 TypeScript Interface</h2>
+
+    <pre><code>interface Speaker {
+    speak(): void;
+}
+
+class Dog {
+    speak() {
+        console.log("woof");
+    }
+}</code></pre>
+
+    <p>即使 <code>Dog</code> 没有显式声明 <code>implements Speaker</code>，它仍然可以传给接收 <code>Speaker</code> 的函数。因为 TypeScript 使用结构类型系统：只要结构匹配，就满足接口。</p>
+
+    <p>Rust 不一样。即使一个类型已经有了同名、同签名的 <code>speak()</code> 方法，它仍然不能满足 <code>T: Speaker</code>，必须显式编写 <code>impl Speaker for Dog</code>。</p>
+
+    <pre>TypeScript interface → 长得像就行
+Rust trait          → 必须明确实现</pre>
+
+    <h2>12. TypeScript Interface 更强调 Shape</h2>
+
+    <pre><code>interface User {
+    id: number;
+    name: string;
+}</code></pre>
+
+    <p>TypeScript interface 经常描述“这个对象应该长什么样”，也就是它的 Shape，因此常用于数据结构、对象字段、API 请求、配置对象和函数签名。</p>
+
+    <p>Rust 中的数据形状通常由 <code>struct</code> 描述：</p>
+
+    <pre><code>struct User {
+    id: u64,
+    name: String,
+}</code></pre>
+
+    <p>Trait 更常用于描述行为、能力、协议和约束。可以粗略区分为：TypeScript interface 关注“这个东西长什么样”，Rust trait 关注“这个类型能做什么”。</p>
+
+    <h2>13. Rust 为什么不采用“形似即可”</h2>
+
+    <p>Trait 不只参与简单的接口检查，还参与泛型约束、方法解析、关联类型、运算符重载、类型推导、单态化、实现选择和编译期检查。</p>
+
+    <pre><code>trait Add&lt;Rhs&gt; {
+    type Output;
+
+    fn add(self, rhs: Rhs) -&gt; Self::Output;
+}</code></pre>
+
+    <p>编译器必须明确知道 <code>A + B</code> 应该使用哪个 <code>impl</code>，以及关联类型 <code>Output</code> 是什么。因此 Rust 要求 <code>Type + Trait → impl Trait for Type</code> 之间存在明确关系，而不只是“碰巧长得像”。</p>
+
+    <h2>14. 为什么 Rust 不鼓励 Java 式过度接口化</h2>
+
+    <p>Java 项目中经常出现 <code>UserService / UserServiceImpl</code>、<code>OrderService / OrderServiceImpl</code> 等只有一个实现的接口。Rust 通常不会仅仅为了“面向接口编程”就创建 Trait。</p>
+
+    <p>如果当前只有一个 <code>UserService</code>，直接为结构体实现方法即可：</p>
+
+    <pre><code>struct UserService;
+
+impl UserService {
+    fn create_user(&amp;self) {}
+}</code></pre>
+
+    <p>当真正出现多个实现、共享行为、泛型约束、算法能力要求或运行时抽象边界时，再提取 Trait。Rust 不是不喜欢 Trait，而是不喜欢为了 OO 类型层级本身制造 Trait。</p>
+
+    <h2>15. 三种语言快速对照</h2>
+
+    <table>
+      <thead>
+        <tr><th>特性</th><th>Java Interface</th><th>TypeScript Interface</th><th>Rust Trait</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>核心理解</td><td>OO 接口</td><td>结构描述</td><td>类型能力</td></tr>
+        <tr><td>是否需要显式实现</td><td>是</td><td>否</td><td>是</td></tr>
+        <tr><td>形似即可</td><td>否</td><td>是</td><td>否</td></tr>
+        <tr><td>常描述字段结构</td><td>较少</td><td>非常常见</td><td>通常不用</td></tr>
+        <tr><td>泛型约束</td><td>支持</td><td>常见</td><td>核心用途</td></tr>
+        <tr><td>静态多态</td><td>不是核心</td><td>类型层面</td><td>核心</td></tr>
+        <tr><td>动态多态</td><td>核心用途</td><td>运行时被擦除</td><td><code>dyn Trait</code></td></tr>
+        <tr><td>虚函数</td><td>常见</td><td>无直接对应</td><td><code>dyn Trait</code> 时使用</td></tr>
+      </tbody>
+    </table>
+
+    <h2>16. 最终脑内模型</h2>
+
+    <p>不要看到 <code>trait Foo</code> 就直接把它翻译成 Java 的 <code>interface Foo</code>。更好的理解是：<code>trait Foo</code> 定义了一种叫 Foo 的能力。</p>
+
+    <ul>
+      <li><code>T: Foo</code> 表示 <code>T</code> 明确拥有 Foo 能力。</li>
+      <li><code>dyn Foo</code> 表示这里有某个拥有 Foo 能力的对象，但具体类型在运行时才能确定。</li>
+    </ul>
+
+    <pre>                    Trait
+                      │
+               描述一种能力
+                      │
+          ┌───────────┴───────────┐
+          │                       │
+      T: Trait                dyn Trait
+      impl Trait             &amp;dyn Trait
+                            Box&lt;dyn Trait&gt;
+          │                       │
+       静态多态                 动态多态
+          │                       │
+       单态化                   vtable
+          │                       │
+      编译期确定               运行时确定</pre>
+
+    <h2>快速复习</h2>
+
+    <ol>
+      <li><strong>Rust Trait 描述“类型拥有什么能力”。</strong></li>
+      <li><strong><code>T: Trait</code> 是泛型约束，通常通过单态化实现静态多态。</strong></li>
+      <li><strong><code>dyn Trait</code> 才是真正的运行时接口多态，底层通常使用 vtable。</strong></li>
+      <li><strong><code>impl Trait</code> 隐藏具体类型，但编译器仍然知道具体类型。</strong></li>
+      <li><strong>TypeScript interface 是结构类型：长得像就行；Rust Trait 必须显式 <code>impl</code>。</strong></li>
+      <li><strong>Java 更习惯用 interface 构造对象抽象层级；Rust 更习惯用 Trait 描述算法需要的能力。</strong></li>
+    </ol>
+
+    <blockquote><p><strong>Java 常用 interface 隐藏“对象具体是什么”，TypeScript interface 描述“对象长什么样”，Rust Trait 更强调“类型能够做什么”。</strong></p></blockquote>
+  </article>
+</main>
+</body>
+</html>
