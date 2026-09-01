@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Codex Core 上下文压缩机制：从 History 膨胀到 Context Window 重建 — stack3mpty</title>
+<meta name="description" content="梳理 Codex Core 如何统计上下文 Token、触发 Compact、重建 History，并更新 Window、Rollout 与 Session 状态。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <a href="index.html">← all writing</a>
+  </header>
+
+  <article>
+    <h1>Codex Core 上下文压缩机制：从 History 膨胀到 Context Window 重建</h1>
+    <time datetime="2026-09-01">2026-09-01</time>
+
+    <p>Codex 是一个多轮、工具驱动的智能体系统。一次用户输入可能触发多次模型请求、Shell 执行、文件修改、MCP 调用和 Agent 通信，这些信息都会逐步进入会话历史。</p>
+
+    <p>随着 Session 不断运行，History 会越来越大。当它接近模型上下文窗口上限时，Codex 必须压缩历史，否则模型将无法继续接收工具结果和用户新指令，也无法留下足够的输出空间。</p>
+
+    <p>整条压缩链路可以概括为：</p>
+
+    <pre aria-label="Codex 上下文压缩链路">持续积累 History
+→ 计算当前上下文 Token
+→ 判断是否需要压缩
+→ 选择 Compact 实现
+→ 生成压缩后的 History
+→ 原子替换 Session History
+→ 重算 Token
+→ 继续当前 Turn 或下一个 Turn</pre>
+
+    <h2>一、Codex 中的上下文层级</h2>
+
+    <p>理解压缩链路前，需要先区分 Session、Turn、Step，以及 History 与 Prompt。</p>
+
+    <h3>Session</h3>
+
+    <p>Session 对应一段完整聊天的运行生命周期，持有跨 Turn 的状态：</p>
+
+    <ul>
+      <li><code>ContextManager</code>，即模型可见的 History。</li>
+      <li>Token 使用状态与当前 Compact Window。</li>
+      <li>Rollout 持久化和当前运行任务。</li>
+      <li>MCP、模型客户端与扩展服务。</li>
+    </ul>
+
+    <p>History 属于 Session，因为它需要跨多个用户 Turn 持续存在。</p>
+
+    <h3>Turn</h3>
+
+    <p>Turn 通常对应一次用户输入所启动的完整执行过程。一次 Turn 内可能发生：</p>
+
+    <pre>模型请求
+→ 工具调用
+→ 工具结果
+→ 再次请求模型
+→ 更多工具调用
+→ 最终回答</pre>
+
+    <p>因此，一次 Turn 不等于一次模型请求。</p>
+
+    <h3>Step</h3>
+
+    <p>Step 是 Turn 内的一次模型采样步骤。每个 <code>StepContext</code> 会冻结本次请求使用的模型和推理参数、环境快照、MCP 连接、工具集合、<code>AGENTS.md</code> 与权限策略。</p>
+
+    <pre>Session
+  └─ Turn
+      ├─ Step 1：模型请求
+      ├─ Step 2：工具结果后的模型请求
+      └─ Step 3：生成最终回答</pre>
+
+    <h3>History 与 Prompt</h3>
+
+    <p>History 是 Session 中持续积累的模型可见记录，而 Prompt 是某个 Step 实际发送给模型的请求：</p>
+
+    <pre>Prompt
+= 规范化后的 History
++ Base Instructions
++ 当前工具定义
++ 模型配置
++ Output Schema
++ 其他请求级元数据</pre>
+
+    <p>每次请求前，Codex 会调用 <code>history.for_prompt(...)</code>，补齐工具调用关系、删除孤立结果，并移除当前模型不支持的图片或音频。</p>
+
+    <h2>二、History 是如何不断增长的</h2>
+
+    <p>模型可见内容最终都会以 <code>ResponseItem</code> 的形式进入 <code>ContextManager</code>，主要包括：</p>
+
+    <ul>
+      <li>用户消息、Developer 消息和模型回答。</li>
+      <li>Reasoning。</li>
+      <li>Function Tool 与 Custom Tool 的调用及结果。</li>
+      <li>Shell、Tool Search、Web Search 和 Image Generation。</li>
+      <li>Agent 间通信与 Compact 结果。</li>
+    </ul>
+
+    <p>典型记录链路为：</p>
+
+    <pre>用户输入、模型输出或工具结果
+→ record_conversation_items()
+→ 预处理图片和元数据
+→ 截断过大的工具输出
+→ 获取 SessionState Mutex
+→ 追加到 ContextManager
+→ 持久化到 Rollout</pre>
+
+    <p>History 按从旧到新的顺序保存。为了避免一次工具调用直接撑满上下文，<code>FunctionCallOutput</code> 和 <code>CustomToolCallOutput</code> 在进入 History 时就可能按照模型的截断策略裁剪。</p>
+
+    <p>History 和 Rollout 不是同一个概念：</p>
+
+    <ul>
+      <li><strong>History：</strong>当前发送给模型的有效上下文。</li>
+      <li><strong>Rollout：</strong>追加式的本地恢复日志。</li>
+    </ul>
+
+    <p>Compact 会替换有效 History，但不会直接删除磁盘上的旧 Rollout，而是向 Rollout 写入新的压缩检查点。</p>
+
+    <h2>三、上下文 Token 是如何计算的</h2>
+
+    <p>每次模型响应完成时，服务端通常会返回 <code>TokenUsage</code>，Codex 将其写入 <code>ContextManager.token_info</code>。</p>
+
+    <p>但服务端统计只覆盖最近一次请求。之后由客户端写入的用户消息、Steer 输入或工具结果可能还没有被服务端统计，因此 Codex 还会进行本地估算：</p>
+
+    <pre>active_context_tokens
+≈ 最近一次服务端 total_tokens
++ 最近一次模型响应后新增内容的估算 Token</pre>
+
+    <p>如果服务端没有包含历史 reasoning token，客户端还会估算并补充相应消耗。本地估算主要根据模型可见序列化大小近似计算，并非 tokenizer 级别的精确统计；服务端返回的 usage 仍然是主要依据。</p>
+
+    <h2>四、如何判断需要 Compact</h2>
+
+    <p>Codex 同时维护模型硬窗口与自动压缩阈值。</p>
+
+    <h3>模型硬窗口</h3>
+
+    <p>当前模型实际可使用的最大上下文容量来自 <code>turn_context.model_context_window()</code>，由当前模型的 <code>ModelInfo</code> 和有效窗口比例决定。达到硬窗口后，请求可能直接被模型服务拒绝。</p>
+
+    <h3>自动压缩阈值</h3>
+
+    <p>自动压缩阈值来自 <code>model_auto_compact_token_limit</code>。如果没有显式配置，模型默认阈值通常不会超过上下文窗口的 90%。Codex 会提前为下一条用户输入、工具调用参数、工具结果、最终输出和 Reasoning 预留空间。</p>
+
+    <pre>auto_compact_scope_tokens &gt;= auto_compact_limit
+或
+active_context_tokens &gt;= full_context_window</pre>
+
+    <h3>Token 统计范围</h3>
+
+    <p>Auto Compact 支持两种统计范围：</p>
+
+    <ul>
+      <li><strong>Total：</strong>统计 Base Instructions、History 与后续增长组成的整个活跃上下文。</li>
+      <li><strong>BodyAfterPrefix：</strong>只统计当前 Compact Window 建立后新增的正文，即当前活跃 Token 减去 Window 初始 Prefix Token。</li>
+    </ul>
+
+    <p><code>BodyAfterPrefix</code> 适合基础指令和固定环境上下文本身就很大的情况，可以避免刚创建新窗口就再次触发压缩。</p>
+
+    <h2>五、哪些地方会触发上下文压缩</h2>
+
+    <p>Codex 的触发方式主要分为用户手动触发、Pre-turn 自动压缩和 Mid-turn 自动压缩。</p>
+
+    <h3>1. 用户手动触发</h3>
+
+    <p>客户端提交 <code>Op::Compact</code>，Submission Loop 接收后启动独立的 Compact Turn：</p>
+
+    <pre>handlers::compact()
+→ 创建 TurnContext
+→ spawn CompactTask
+→ CompactTask::run()</pre>
+
+    <p>它拥有自己的 <code>TurnStarted</code>、<code>RunningTask</code>、Compact 生命周期事件与 <code>TurnComplete</code>。</p>
+
+    <h3>2. Pre-turn 自动压缩</h3>
+
+    <p>普通 <code>run_turn()</code> 会在第一次模型采样前执行 Pre-sampling Compact 检查。如果旧 Session History 已达到阈值，会先 Compact，再进行正常模型请求。</p>
+
+    <pre>新 Turn 开始
+→ 检查 Token
+→ 先 Compact
+→ 再进行正常模型请求</pre>
+
+    <p>从大上下文模型切换到小上下文模型，或前后模型的 Compact Compatibility Hash 不一致时，也可能触发 Pre-turn Compact。</p>
+
+    <h3>3. Mid-turn 自动压缩</h3>
+
+    <p>每次模型响应及相关工具执行结束后，<code>run_turn()</code> 会重新检查模型是否还要求继续、是否存在 Pending Input、Token 是否达到阈值，以及是否收到显式创建新 Context Window 的请求。</p>
+
+    <pre>模型请求完成
+→ 工具结果写入 History
+→ 当前 Turn 仍需继续
+→ Token 达到阈值
+→ Mid-turn Compact
+→ 使用压缩后的 History 继续下一轮模型请求</pre>
+
+    <p>只有当前 Turn 仍需继续时，才有必要立即执行 Mid-turn Compact。如果模型已经给出最终回答且没有 Pending Input，可以先结束当前 Turn，在下一个 Turn 开始前执行 Pre-turn Compact。</p>
+
+    <h2>六、Codex 的四种 Compact 实现</h2>
+
+    <p>触发方式回答“什么时候压缩”，Compact 类型回答“怎样压缩”。这是两个不同维度。</p>
+
+    <table>
+      <thead><tr><th>类型</th><th>核心策略</th><th>主要场景</th></tr></thead>
+      <tbody>
+        <tr><td>TokenBudget</td><td>不生成摘要，直接建立新上下文窗口</td><td>实验性 Token Budget 模式</td></tr>
+        <tr><td>Remote V2</td><td>服务端生成加密 Compaction，客户端重建 History</td><td>当前默认远程方案</td></tr>
+        <tr><td>Remote 旧版</td><td>服务端返回完整压缩 History</td><td>兼容旧协议</td></tr>
+        <tr><td>Local</td><td>普通模型请求生成文本摘要</td><td>Provider 不支持远程压缩</td></tr>
+      </tbody>
+    </table>
+
+    <pre>TokenBudget 开启
+→ TokenBudget Compact
+
+否则 Provider 支持 Remote V2
+  → RemoteCompactionV2 开启：Remote V2
+  → RemoteCompactionV2 关闭：旧 Remote
+
+否则
+→ Local Compact</pre>
+
+    <h3>TokenBudget Compact</h3>
+
+    <p>TokenBudget 不调用模型生成摘要，而是直接开启全新的 Context Window。新 History 主要由最新初始上下文、当前 World State 和可选客户端 Developer 消息组成，旧对话过程基本不会进入新窗口。</p>
+
+    <p>它速度快、成本低且行为确定，但历史任务信息损失最大，目前属于实验性能力。</p>
+
+    <h3>Remote Compact V2</h3>
+
+    <p>Remote V2 将规范化后的 History 与 <code>CompactionTrigger</code> 发送给 Responses 服务。服务端返回唯一的 Compaction Item：</p>
+
+    <pre><code>ResponseItem::Compaction {
+    encrypted_content,
+    ...
+}</code></pre>
+
+    <p>语义压缩算法运行在服务端，客户端不解析 <code>encrypted_content</code>。客户端负责裁剪过大的工具结果、构造请求、流式重试、校验返回项、选择需要原样保留的消息、应用 Token 与图片预算，并重建和替换 History。</p>
+
+    <pre>最近的重要用户消息
++ 可选客户端 Developer 消息
++ 部分必要 Agent 消息
++ 服务端 Compaction Item</pre>
+
+    <p>普通保留消息的预算约为 64K Token，并从较新消息向旧消息选择。官方 Responses API 也将压缩结果定义为保留的用户消息加一个加密 Compaction Item。</p>
+
+    <h3>Remote 旧版</h3>
+
+    <p>旧版 Remote Compact 调用专门的远程压缩接口，由服务端直接返回一组完整的新 History。客户端随后清理旧 Developer 上下文、非真实用户消息、工具执行中间项和 Reasoning。</p>
+
+    <p>旧版返回内容与原始 <code>ResponseItemEnvelope</code> 之间没有稳定对应关系，因此无法像 V2 一样完整保留客户端 metadata。</p>
+
+    <h3>Local Compact</h3>
+
+    <p>Local Compact 使用普通 Responses 请求，让当前模型生成文本交接摘要：</p>
+
+    <pre>复制当前 History
+→ 追加 compact_prompt
+→ 请求当前模型生成交接摘要
+→ 提取最后一条 Assistant 消息
+→ 收集最近真实用户消息
+→ 构建新 History</pre>
+
+    <p>默认 <code>compact_prompt</code> 要求模型总结当前进度、关键决策、用户约束与偏好、未完成工作，以及后续模型需要的数据和引用。</p>
+
+    <pre>最近真实用户消息，最多约 20K Token
++ 文本形式的 CompactionSummary</pre>
+
+    <p>旧 Assistant 回复、Reasoning、工具调用和工具输出不再逐项保留，重要信息依赖摘要继续传递。如果压缩请求本身已经超过模型窗口，Local Compact 会逐步移除最老的 History Item，优先保留最近内容，直到请求能够发送。</p>
+
+    <h2>七、Compact 会改变哪些状态</h2>
+
+    <p>Compact 不只是生成一段摘要，它会修改 Session 中多个相互关联的状态。</p>
+
+    <h3>1. 替换 ContextManager History</h3>
+
+    <p>成功后，<code>sess.replace_compacted_history(...)</code> 将压缩结果安装为新的 Session History，并递增 <code>ContextManager.history_version</code>，表示发生了一次非追加式重写。</p>
+
+    <p>压缩请求始终在 History 副本上执行；只有完整成功后才替换正式 History。请求失败时，原 History 保持不变。</p>
+
+    <h3>2. 推进 Auto Compact Window</h3>
+
+    <p>每次成功压缩都会推进 Window Number、轮换当前与 Previous Window ID、创建新的 Window ID、清除旧窗口触发标志，并重建新窗口的 Token 基线。</p>
+
+    <p>Window ID 可用于 Telemetry、Rollout 恢复、多次 Compact 链路追踪和 Token Budget 统计。</p>
+
+    <h3>3. 重新计算 Token</h3>
+
+    <p>旧 Token Usage 对应旧 History，替换后已经失效。Codex 会调用 <code>sess.recompute_token_usage(...)</code>，根据新 History 重新估算当前上下文大小，并建立新窗口的 Prefix Token Baseline。</p>
+
+    <p>这里重算的是当前模型上下文占用，不代表抹掉历史累计计费数据。</p>
+
+    <h3>4. 更新 Reference Context</h3>
+
+    <p><code>reference_context_item</code> 用于计算后续环境上下文差异。手动或 Pre-turn Compact 使用 <code>InitialContextInjection::DoNotInject</code>，压缩后清空 reference，由下一个普通 Step 重新注入最新完整上下文。</p>
+
+    <p>Mid-turn Compact 使用 <code>InitialContextInjection::BeforeLastUserMessage</code>，立即把当前环境和初始上下文插入新 History，并建立新的 reference baseline，使当前 Turn 可以继续执行。</p>
+
+    <h3>5. 更新 World State Baseline</h3>
+
+    <p>工作目录、环境和能力状态可能在长时间执行中变化。Mid-turn Compact 会保存完整的当前 World State Snapshot，后续只需向模型发送环境变化的增量。</p>
+
+    <h3>6. 写入 Rollout 检查点</h3>
+
+    <p>Codex 会持久化 <code>RolloutItem::Compacted</code>，其中包括 Replacement History、Window Number、Window IDs、MCP Resource Origins 和可选文本摘要。必要时还会写入 <code>RolloutItem::WorldState</code> 与 <code>RolloutItem::TurnContext</code>。</p>
+
+    <p>恢复 Session 时，可以直接从 Rollout 还原压缩后的有效 History，而不需要重新执行压缩。</p>
+
+    <h3>7. 生命周期和 Telemetry</h3>
+
+    <p>Compact 还会触发 Pre/Post Compact Hook、Context Compaction Item 的 Started 与 Completed、Remote Request Trace、Token 和耗时指标，以及错误事件。</p>
+
+    <p>Mid-turn Compact 不会创建新的 <code>RunningTask</code>，它仍发生在当前 <code>RegularTask</code> 和 Turn 内；手动 Compact 才会创建独立的 <code>CompactTask</code>。</p>
+
+    <h2>八、整个设计的核心思路</h2>
+
+    <h3>1. 将触发策略与压缩实现分离</h3>
+
+    <p>Codex 分别回答“什么时候压缩”和“怎样压缩”。触发层统一处理手动、Pre-turn 与 Mid-turn；实现层可以选择 TokenBudget、Remote V2、旧 Remote 或 Local。新增压缩策略时，不需要重写整个 Turn Loop。</p>
+
+    <h3>2. History 是 Session 状态，策略是 Step 快照</h3>
+
+    <p>跨 Turn 的 History 和 Token 状态属于 Session；本次使用的模型、窗口和工具则由 <code>TurnContext</code> 与 <code>StepContext</code> 决定。因此同一个 Session 可以切换模型，并根据当前 Step 的窗口判断旧 History 是否需要压缩。</p>
+
+    <h3>3. 先复制，成功后原子替换</h3>
+
+    <pre>克隆 History
+→ 在副本上请求和构建
+→ 完整校验
+→ 一次性替换</pre>
+
+    <p>远程压缩可能耗时、失败或返回非法数据。只有最终替换会改变正式状态，所以失败恢复只需保留旧 History。</p>
+
+    <h3>4. 语义摘要与确定性保留结合</h3>
+
+    <pre>长期执行过程 → 语义压缩
+最近用户指令 → 原文保留
+当前环境状态 → 重新注入
+工具中间过程 → 大量丢弃</pre>
+
+    <p>Remote V2 进一步把职责拆成：服务端负责语义压缩，客户端负责确定性筛选、预算控制与状态安装。</p>
+
+    <h3>5. 不破坏模型协议结构</h3>
+
+    <p>工具调用与工具结果必须保持成对关系，图片和音频必须符合当前模型能力，客户端 metadata 也应尽可能保留。因此 Compact 不是简单删除数组前半部分，而是按结构化 Item Group 处理。</p>
+
+    <h3>6. 将压缩视为新的 Context Window</h3>
+
+    <pre>旧 Window
+→ Compact Checkpoint
+→ 新 Window</pre>
+
+    <p>将压缩建模为窗口迁移，便于 Token 统计、恢复、追踪与多次压缩管理。</p>
+
+    <h3>7. 明确接受有损压缩</h3>
+
+    <p>上下文压缩本质上是有损操作。多次压缩可能导致精确约束丢失、决策原因消失、摘要错误被持续继承，或模型对任务状态产生漂移。</p>
+
+    <p>因此 Codex 会保留最近用户原文；长线程经历多次压缩后，如果准确率开始下降，创建新 Session 往往比继续压缩更可靠。</p>
+
+    <h2>总结</h2>
+
+    <p>Codex 的上下文压缩不是一个孤立的摘要函数，而是 Session、Turn Loop、History、Token Budget、StepContext、Rollout 和模型 Provider 共同参与的状态迁移过程。</p>
+
+    <pre>History 持续增长
+→ 服务端统计与本地估算 Token
+→ Pre-turn 或 Mid-turn 判断阈值
+→ 选择 Compact 实现
+→ 在 History 副本上生成压缩结果
+→ 保留关键原始消息
+→ 重建 ContextManager
+→ 推进 Window 状态
+→ 持久化 Compact Checkpoint
+→ 重算 Token
+→ 使用新上下文继续执行</pre>
+
+    <blockquote><p><strong>上下文压缩的目标不是单纯让文本更短，而是在有限的模型窗口中，尽可能保留对后续决策最有价值的信息，同时保证执行状态可恢复、工具协议仍然正确、压缩失败不会破坏原始会话。</strong></p></blockquote>
+
+    <p class="dim">参考：<a href="https://developers.openai.com/api/reference/java/resources/responses/methods/compact" target="_blank" rel="noopener">OpenAI Responses API — Compact a response</a>。本文其余 Codex Core 细节基于源码链路整理。</p>
+  </article>
+</main>
+</body>
+</html>
