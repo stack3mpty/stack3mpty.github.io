@@ -1,0 +1,25 @@
+writing/style.css
+  s_fcfe95cbe5157a::t_60ee7d7fd58839 23-25
+writing/index.html
+  s_fcfe95cbe5157a::t_60ee7d7fd58839 20
+index.html
+  s_fcfe95cbe5157a::t_60ee7d7fd58839 302
+writing/rust-trait-vs-java-typescript-interface.html
+  s_fcfe95cbe5157a::t_60ee7d7fd58839 1-341
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "9ecc21f926fbf2cc3ffca4b832b328404f7ef22e",
+  "prompts": {},
+  "sessions": {
+    "s_fcfe95cbe5157a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0569d-f005-70a0-9f02-25d3792e5780",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "c.kai <c.kai@trip.com>"
+    }
+  }
+}
