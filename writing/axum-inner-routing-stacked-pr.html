@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>给 Axum 补齐 Inner 路由语义：从 #3880 到一个 Stacked PR — stack3mpty</title>
+<meta name="description" content="一次 Axum 路由 API 贡献：为 MatchedPath 和 RawPathParams 补齐 inner-router 语义，并用 stacked PR 管理前置依赖。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <a href="index.html">← all writing</a>
+  </header>
+
+  <article>
+    <h1>给 Axum 补齐 Inner 路由语义：从 #3880 到一个 Stacked PR</h1>
+    <time datetime="2026-09-08">2026-09-08</time>
+
+    <p>最近我给 Axum 提交了一个小型功能 PR，目标是解决嵌套路由下两个路径 extractor 缺少“当前 Router 视角”的问题：<code>MatchedPath</code> 和 <code>RawPathParams</code>。</p>
+
+    <p>对应的是 <a href="https://github.com/tokio-rs/axum/issues/3880" target="_blank" rel="noopener">tokio-rs/axum#3880</a>，最终提交的改动是 <a href="https://github.com/tokio-rs/axum/pull/3885" target="_blank" rel="noopener">PR #3885</a>。</p>
+
+    <p>代码量本身不大，但它涉及一个很典型的框架设计问题：</p>
+
+    <blockquote><p><strong>当一个组件被嵌套到更大的系统中时，它应该看到全局上下文，还是只看到属于自己的局部上下文？</strong></p></blockquote>
+
+    <p>Axum 已经在 <code>Path</code> 上开始解决这个问题，这次修改则进一步补齐这套语义。</p>
+
+    <h2>1. 问题从 Router::nest 开始</h2>
+
+    <p>假设我们先定义一个可复用的用户路由：</p>
+
+    <pre><code>let users = Router::new()
+    .route("/users/{user_id}", get(handler));</code></pre>
+
+    <p>再把它挂载到租户路由下：</p>
+
+    <pre><code>let app = Router::new()
+    .nest("/tenants/{tenant_id}", users);</code></pre>
+
+    <p>请求 <code>/tenants/acme/users/42</code> 从整个应用看包含两个动态参数：</p>
+
+    <pre>tenant_id = acme
+user_id   = 42</pre>
+
+    <p>但从 <code>users</code> 子 Router 的视角，它真正定义的只有 <code>/users/{user_id}</code>。理论上，handler 只需要关心 <code>user_id = 42</code>，不应因为外部挂载位置而被迫知道 <code>tenant_id</code>。这就是 reusable router 的封装边界问题。</p>
+
+    <h2>2. Path 为什么会受到外层 Router 影响</h2>
+
+    <p>传统行为中，下面的 extractor 会拿到请求路径上的全部 capture：</p>
+
+    <pre><code>async fn handler(Path(params): Path&lt;HashMap&lt;String, String&gt;&gt;) {
+    // tenant_id 和 user_id
+}</code></pre>
+
+    <p>这符合 <code>Path</code> 一贯的全局语义，但会让可复用 Router 与最终挂载位置耦合。一个 <code>user_router()</code> 不应该关心自己最终位于 <code>/api</code>、<code>/tenants/{tenant_id}</code>，还是 <code>/organizations/{org_id}/regions/{region}</code>。</p>
+
+    <h2>3. #3856 引入了 InnerPath</h2>
+
+    <p>在 #3880 之前，<a href="https://github.com/tokio-rs/axum/pull/3856" target="_blank" rel="noopener">PR #3856</a> 已经新增了 <code>InnerPath&lt;T&gt;</code>：</p>
+
+    <pre>Path&lt;T&gt;
+    = 当前请求中的所有 path captures
+
+InnerPath&lt;T&gt;
+    = 当前最内层 Router 自己的 captures</pre>
+
+    <pre><code>async fn handler(
+    Path(all): Path&lt;Vec&lt;(String, String)&gt;&gt;,
+    InnerPath(inner): InnerPath&lt;Vec&lt;(String, String)&gt;&gt;,
+) {
+    // ...
+}</code></pre>
+
+    <p>对于 <code>/tenants/acme/users/42</code>，两者分别得到：</p>
+
+    <pre>Path:
+[("tenant_id", "acme"), ("user_id", "42")]
+
+InnerPath:
+[("user_id", "42")]</pre>
+
+    <h2>4. Axum 如何记录 inner 边界</h2>
+
+    <p>Axum 内部通过 <code>UrlParams</code> 保存匹配到的 URL 参数。#3856 将它扩展为类似结构：</p>
+
+    <pre><code>UrlParams::Params {
+    params: Vec&lt;(Arc&lt;str&gt;, PercentDecodedStr)&gt;,
+    inner_start: usize,
+}</code></pre>
+
+    <p>假设参数依次为 <code>tenant_id</code> 和 <code>user_id</code>，且 <code>inner_start = 1</code>，那么 <code>&amp;params[inner_start..]</code> 就是内层 Router 自己的参数。</p>
+
+    <p>这套设计没有维护 <code>all_params</code> 和 <code>inner_params</code> 两份数据，而是使用“一份 Vec + 一个索引”，既简单，也避免额外复制。</p>
+
+    <h2>5. #3880：只有 Path 有 Inner 版本</h2>
+
+    <p>有了 <code>InnerPath</code> 后，path API 出现了不对称。除了 <code>Path</code>，Axum 还有两个常见 extractor：</p>
+
+    <pre><code>MatchedPath
+RawPathParams</code></pre>
+
+    <p>它们仍然只能看到完整路由视角。</p>
+
+    <h2>6. MatchedPath 的问题</h2>
+
+    <p><code>MatchedPath</code> 返回匹配到的 route pattern，而不是实际 URL。单独的 <code>/users/{user_id}</code> 路由会返回：</p>
+
+    <pre>/users/{user_id}</pre>
+
+    <p>嵌套到 <code>/tenants/{tenant_id}</code> 后，它会变为：</p>
+
+    <pre>/tenants/{tenant_id}/users/{user_id}</pre>
+
+    <p>子 Router 看到的是完整部署路径，而不是自己定义的 route。对于日志、metrics 和 middleware，这会让同一组件挂载到不同位置后产生不同的 metric label。</p>
+
+    <h2>7. 增加 InnerMatchedPath</h2>
+
+    <p>#3880 因此提议加入 <code>InnerMatchedPath</code>：</p>
+
+    <pre>MatchedPath
+    = 完整 matched route
+
+InnerMatchedPath
+    = innermost Router 的 matched route</pre>
+
+    <pre><code>async fn handler(
+    matched: MatchedPath,
+    inner: InnerMatchedPath,
+) {
+    assert_eq!(
+        matched.as_str(),
+        "/tenants/{tenant_id}/users/{user_id}"
+    );
+
+    assert_eq!(inner.as_str(), "/users/{user_id}");
+}</code></pre>
+
+    <p>这与 <code>Path / InnerPath</code> 形成了一组一致的 API。</p>
+
+    <h2>8. 复用 NestedPath，而不是增加路由状态</h2>
+
+    <p>一种直接实现是让 Router 同时维护 <code>MatchedPath</code> 和 <code>InnerMatchedPath</code> 两份 extension，但这会增加 routing state。</p>
+
+    <p>现有实现已经有 <code>NestedPath</code>，它记录 Router 被 nest 在什么路径上，因此可以直接利用：</p>
+
+    <pre>完整 MatchedPath
+- NestedPath
+= InnerMatchedPath</pre>
+
+    <pre>MatchedPath:      /tenants/{tenant_id}/users/{user_id}
+NestedPath:       /tenants/{tenant_id}
+InnerMatchedPath: /users/{user_id}</pre>
+
+    <p>核心目标是复用现有 routing context，而不是为了一个 extractor 再增加一套内部 bookkeeping。</p>
+
+    <h2>9. RawPathParams 的问题更有意思</h2>
+
+    <p><code>RawPathParams</code> 是 <code>Path&lt;T&gt;</code> 的低层版本，可以直接遍历参数，避免 Serde 反序列化和部分额外分配：</p>
+
+    <pre><code>async fn handler(params: RawPathParams) {
+    for (key, value) in &amp;params {
+        println!("{key} = {value}");
+    }
+}</code></pre>
+
+    <p>嵌套 Router 中，它仍然返回 <code>tenant_id</code> 与 <code>user_id</code>。既然 #3856 已经记录了 <code>inner_start</code>，问题就变成：是否还需要设计一个 <code>InnerRawPathParams</code>？</p>
+
+    <h2>10. 为什么没有新增 InnerRawPathParams</h2>
+
+    <p>如果为 inner variant 复制一份新的 Vec，会违背 <code>RawPathParams</code> 少转换、少分配、直接访问底层参数的定位。因此，更合适的方案是暴露已有边界：</p>
+
+    <pre><code>params.inner_start()</code></pre>
+
+    <p>调用方可以自己选择 inner slice：</p>
+
+    <pre><code>for (key, value) in params.iter().skip(params.inner_start()) {
+    // only inner router params
+}</code></pre>
+
+    <pre>额外 Vec 分配：0
+额外字符串复制：0
+额外参数解析：0</pre>
+
+    <p>整个方案只多保存一个整数索引。</p>
+
+    <h2>11. RawPathParams 的结构变化</h2>
+
+    <p>修改后的结构类似：</p>
+
+    <pre><code>pub struct RawPathParams {
+    params: Vec&lt;(Arc&lt;str&gt;, PercentDecodedStr)&gt;,
+    inner_start: usize,
+}</code></pre>
+
+    <p>extractor 从内部 <code>UrlParams::Params</code> 同时复制 <code>params</code> 和 <code>inner_start</code>，并公开 <code>pub fn inner_start(&amp;self) -&gt; usize</code>。原来的 <code>params.iter()</code> 完全不受影响，这是一个 additive API change。</p>
+
+    <h2>12. 全局上下文与局部上下文</h2>
+
+    <p>如果只看代码，这次修改只是新增一个 struct 和一个 usize getter。更值得关注的是它背后的抽象：</p>
+
+    <pre>Application
+    └─ Router A
+        └─ Router B
+            └─ Handler</pre>
+
+    <p>对 Handler 来说，全局与局部两类信息都合理：</p>
+
+    <pre>全局信息：完整 route、完整 params
+局部信息：当前 Router route、当前 Router params</pre>
+
+    <p>于是 API 逐渐形成：</p>
+
+    <pre>Path             InnerPath
+MatchedPath      InnerMatchedPath
+RawPathParams    inner_start</pre>
+
+    <p>本质上，这是在为 Axum 补全 global routing context 与 local routing context。</p>
+
+    <h2>13. 为什么 reusable Router 需要它</h2>
+
+    <p>一个 <code>admin_router()</code> 可能被不同应用挂载在 <code>/admin</code>、<code>/api/v1/admin</code>，或者 <code>/organizations/{org_id}/admin</code>。</p>
+
+    <p>如果内部 handler 使用 <code>MatchedPath</code>，route metric 会随 mount location 改变；如果使用 <code>InnerMatchedPath</code>，内部的 <code>/users/{id}</code> 始终保持稳定，Router 的封装边界也就稳定了。</p>
+
+    <h2>14. 这个 PR 不能直接基于 main</h2>
+
+    <p>#3880 的设计依赖 #3856，但开始处理时，#3856 仍然是 open PR，<code>main</code> 中还没有 <code>InnerPath</code> 和 <code>UrlParams::inner_start</code>。</p>
+
+    <p>如果直接基于 <code>main</code> 实现，就必须重新复制 #3856 的代码，最终 PR 会同时包含两组改动，不仅 diff 巨大，也会与原作者产生重复修改。</p>
+
+    <h2>15. 使用 Stacked PR</h2>
+
+    <p>更合理的方法是让自己的 branch 基于 #3856 的 head commit：</p>
+
+    <pre>main
+  │
+  │ #3856
+  ▼
+InnerPath commit
+  │
+  │ #3880
+  ▼
+our commit</pre>
+
+    <p>Git 历史类似：</p>
+
+    <pre>main
+  │
+  A
+  │
+  B
+  │
+  C   ← #3856 head
+  │
+  D
+  E
+  F   ← #3880 changes</pre>
+
+    <p>当前 PR 真正的增量是 <code>C..F</code>：<code>InnerMatchedPath</code>、<code>RawPathParams::inner_start</code> 和测试，不需要重复实现 <code>InnerPath</code>。</p>
+
+    <h2>16. 为什么 GitHub 页面看起来仍然很大</h2>
+
+    <p>upstream PR 的比较目标仍然是当前分支到 <code>tokio-rs/axum:main</code>，而 <code>main</code> 尚未包含 C，因此 GitHub 暂时会显示 A 到 F，也就是 #3856 与 #3880 的总和。</p>
+
+    <p>真正属于当前 PR 的 diff 应该这样看：</p>
+
+    <pre>base = #3856 head
+head = our branch
+
+git diff base..head</pre>
+
+    <p>这也是 PR description 需要明确写出 <code>This PR is stacked on #3856.</code> 的原因。</p>
+
+    <h2>17. 为什么先开 Draft PR</h2>
+
+    <p>因为 #3856 尚未 merge，#3880 不能独立进入 <code>main</code>。直接标为 Ready for Review 容易让 maintainer 误以为它已经可以正常合并。</p>
+
+    <p>更合理的是先开 Draft PR。等 #3856 merge 后，<code>main</code> 自然包含 C，GitHub 只会显示 D、E、F，再把当前 PR 转成 Ready for Review，协作关系会清晰很多。</p>
+
+    <h2>18. 这次修改带来的几个体会</h2>
+
+    <h3>不要只根据 issue description 写代码</h3>
+
+    <p>#3880 看起来只是“add InnerMatchedPath、expose inner_start”，但实现前需要先确认 <code>InnerPath</code> 是否已进入 main、<code>inner_start</code> 在哪里维护、<code>MatchedPath</code> 如何组合 nested route，以及是否已有可复用的 extension。</p>
+
+    <p>如果没有先看 #3856，就很容易再造一套重复状态。</p>
+
+    <h3>先理解数据流，再加 API</h3>
+
+    <pre>matchit
+   ↓
+route match
+   ↓
+UrlParams
+   ↓
+request Extensions
+   ↓
+Path / InnerPath / RawPathParams</pre>
+
+    <p>以及：</p>
+
+    <pre>route pattern
+   ↓
+MatchedPath
+   ↓
+nested route composition</pre>
+
+    <p>理解这些数据流后，方案就很自然：inner params 已经有 <code>inner_start</code>，inner matched path 已经有 nested routing information。</p>
+
+    <blockquote><p><strong>真正好的 patch 往往不是“再造一个机制”，而是把已有信息以正确的 API 暴露出来。</strong></p></blockquote>
+
+    <h3>小 PR 也包含 API 设计</h3>
+
+    <p>对于 <code>RawPathParams</code>，<code>InnerRawPathParams</code> 在表面上更对称，但 <code>inner_start()</code> 更符合其避免额外 deserialize 和 allocation 的性能定位。</p>
+
+    <p>API 设计不一定追求表面完全对称，更重要的是保持类型自身的语义。</p>
+
+    <h2>19. 总结</h2>
+
+    <p>这个 issue 可以用一句话概括：</p>
+
+    <blockquote><p><strong>Axum 已经为 <code>Path</code> 提供了 inner-router 语义，但 <code>MatchedPath</code> 和 <code>RawPathParams</code> 仍然只能看到整个路由树的信息，因此 #3880 补齐了这部分能力。</strong></p></blockquote>
+
+    <pre>MatchedPath
+    ↓
+新增 InnerMatchedPath
+
+RawPathParams
+    ↓
+公开 inner_start</pre>
+
+    <p>设计目标是让完整上下文和局部 Router 上下文同时可用，并且不引入不必要的数据复制。</p>
+
+    <p>从更抽象的角度看，它解决的是 reusable component 的封装问题：一个子 Router 不应该因为被挂载到不同路径，就被迫改变自己对 route metadata 的理解。</p>
+
+    <p>虽然这是一个相对小的 Axum contribution，但其中涉及的 Router composition、extension state、零额外分配设计和 stacked PR 工作流，都是很典型的开源框架开发问题。</p>
+
+    <p class="dim">参考：<a href="https://github.com/tokio-rs/axum/issues/3880" target="_blank" rel="noopener">Issue #3880</a>、<a href="https://github.com/tokio-rs/axum/pull/3885" target="_blank" rel="noopener">PR #3885</a>、<a href="https://github.com/tokio-rs/axum/pull/3856" target="_blank" rel="noopener">PR #3856</a>。</p>
+  </article>
+</main>
+</body>
+</html>
