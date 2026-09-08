@@ -1,0 +1,23 @@
+index.html
+  s_fcfe95cbe5157a::t_cffee962d8ca8e 302
+writing/index.html
+  s_fcfe95cbe5157a::t_cffee962d8ca8e 20
+writing/puppeteer-context-pool-lifecycle.html
+  s_fcfe95cbe5157a::t_cffee962d8ca8e 1-223
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "ca1218a564557be5f07c5fe670ff5073d3d7b0e1",
+  "prompts": {},
+  "sessions": {
+    "s_fcfe95cbe5157a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0569d-f005-70a0-9f02-25d3792e5780",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "c.kai <c.kai@trip.com>"
+    }
+  }
+}
