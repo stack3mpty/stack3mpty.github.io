@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>从资源泄漏到生命周期托管：一次 Puppeteer 浏览器资源池改造 — stack3mpty</title>
+<meta name="description" content="一次 Puppeteer Browser Context 资源池改造：修复资源泄漏、隔离超时任务，以 waiter 队列替代轮询，同时保持原有业务语义。">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <a href="index.html">← all writing</a>
+  </header>
+
+  <article>
+    <h1>从资源泄漏到生命周期托管：一次 Puppeteer 浏览器资源池改造</h1>
+    <time datetime="2026-09-08">2026-09-08</time>
+
+    <p>在基于 Puppeteer 的页面渲染服务中，真正难处理的往往不是“如何打开页面”，而是“页面执行结束后，浏览器资源是否仍然处于可靠状态”。</p>
+
+    <p>一次看似普通的超时，可能让已经返回失败的任务继续操作浏览器；一个遗漏的归还操作，也可能在几次请求后耗尽整个资源池。</p>
+
+    <p>本文分享一次 Browser Context 资源池的生命周期改造，以及如何在修复资源问题的同时保持原有业务语义。</p>
+
+    <h2>项目背景</h2>
+
+    <p>该服务基于 Node.js、Koa 和 Puppeteer，主要提供两类能力：</p>
+
+    <ul>
+      <li>将页面渲染并序列化为 HTML。</li>
+      <li>将页面渲染后生成截图。</li>
+    </ul>
+
+    <p>为了避免每个请求都启动一个 Chrome 实例，服务预先创建固定数量的 Incognito Browser Context。请求到来时从资源池借用 Context，创建 Page 执行任务，完成后再归还。</p>
+
+    <p>理想的生命周期应该是：</p>
+
+    <pre aria-label="Browser Context 理想生命周期">获取 Context
+    ↓
+创建 Page
+    ↓
+执行渲染或截图
+    ↓
+关闭 Page
+    ↓
+归还 Context</pre>
+
+    <p>但在异常、超时和浏览器断线等场景下，这条链路很容易被打断。</p>
+
+    <h2>问题一：Context 被取出后没有归还</h2>
+
+    <p>原来的 HTML 渲染路径只从资源池获取 Page，没有保留对应的 Context，也就无法在任务结束后归还。</p>
+
+    <p>当资源池容量固定时，这个问题非常直接：每执行一次渲染，就永久减少一个可用 Context。资源池耗尽后，后续请求只能一直等待。</p>
+
+    <p>除此之外，部分提前返回和异常路径也没有关闭 Page，例如：</p>
+
+    <ul>
+      <li>页面没有获得有效响应。</li>
+      <li>页面脚本执行失败。</li>
+      <li>HTML 序列化失败。</li>
+      <li>Puppeteer API 抛出异常。</li>
+    </ul>
+
+    <p>这些泄漏最终会表现为 Chrome 内存持续增长、请求积压，甚至整个渲染服务失去响应。</p>
+
+    <h2>问题二：Promise 超时不会停止底层任务</h2>
+
+    <p>截图路径原本使用 <code>Promise.race</code> 实现 40 秒超时。但这种方式只能让外层 Promise 提前失败，不能真正取消正在执行的 Puppeteer 操作：</p>
+
+    <pre>截图任务仍在运行
+        ↓
+外层 Promise 超时返回
+        ↓
+Context 被放回资源池
+        ↓
+新请求取得同一个 Context</pre>
+
+    <p>此时旧任务和新任务可能同时操作同一个 Browser Context，导致：</p>
+
+    <ul>
+      <li>Page 被意外关闭。</li>
+      <li>截图内容互相干扰。</li>
+      <li>浏览器状态串扰。</li>
+      <li>随机出现 <code>Target closed</code> 等协议错误。</li>
+    </ul>
+
+    <p>因此，超时后的 Context 不能直接复用。正确做法是关闭整个 Context，并在确认旧 Context 已退出后创建新 Context，补回资源池容量。</p>
+
+    <h2>问题三：20ms 轮询造成无效开销</h2>
+
+    <p>原资源池在没有空闲 Context 时，每个等待请求都会每隔 20ms 检查一次：</p>
+
+    <pre><code>const check = () =&gt; {
+    const context = fetchIdleContext();
+
+    if (context) {
+        resolve(context);
+    } else {
+        setTimeout(check, 20);
+    }
+};</code></pre>
+
+    <p>这种实现简单，但在高并发下会产生大量无效定时器。例如有 100 个等待请求时，每秒可能执行约 5000 次资源检查。多个 waiter 还会周期性同时醒来，形成类似“惊群”的竞争。</p>
+
+    <p>更麻烦的是，浏览器断线后旧资源池不会再获得 Context，这些轮询任务可能永远继续执行。</p>
+
+    <h2>解决方案：统一托管 Context 生命周期</h2>
+
+    <p>改造后的核心思路是：调用方不再直接负责获取和归还 Context，而是通过统一入口执行任务。</p>
+
+    <pre><code>withContext(async (context, checkActive) =&gt; {
+    // 使用 context 执行任务
+}, timeout);</code></pre>
+
+    <p>统一入口负责：</p>
+
+    <ol>
+      <li>从资源池取得 Context。</li>
+      <li>执行渲染任务。</li>
+      <li>判断任务是否超时。</li>
+      <li>正常结束时归还 Context。</li>
+      <li>超时时关闭并替换 Context。</li>
+      <li>浏览器已经重连时，禁止旧 Context 回到新资源池。</li>
+    </ol>
+
+    <p>Page 则在业务代码中通过 <code>try/finally</code> 清理：</p>
+
+    <pre><code>const runner = await context.createRunEnv(false);
+
+try {
+    return await render(runner.page);
+} finally {
+    await runner.close();
+}</code></pre>
+
+    <p>这样无论任务成功、失败还是提前返回，Page 都能得到释放。</p>
+
+    <h2>从轮询改为 waiter 队列</h2>
+
+    <p>资源池没有空闲 Context 时，现在会保存请求对应的 Promise resolver：</p>
+
+    <pre>请求进入 waiter 队列
+        ↓
+Context 被归还
+        ↓
+直接交给队首 waiter</pre>
+
+    <p>这种实现具有几个明显优势：</p>
+
+    <ul>
+      <li>没有资源时不反复唤醒事件循环。</li>
+      <li>Context 归还后可以立即交接。</li>
+      <li>每个 Context 只唤醒一个等待者。</li>
+      <li>天然按照 FIFO 顺序处理。</li>
+      <li>浏览器断线时可以一次性释放全部 waiter。</li>
+    </ul>
+
+    <p>这里不需要引入完整的事件系统，一个简单的 Promise resolver 队列已经足够完成资源交接。</p>
+
+    <h2>修复问题，但不改变业务语义</h2>
+
+    <p>资源池重构很容易顺手改变超时范围，因此需要明确区分“生命周期管理”和“业务超时”。本次改造保持了原有约定：</p>
+
+    <ul>
+      <li>HTML render 不增加 40 秒总超时。</li>
+      <li>screenshot 仍保留原来的 40 秒执行超时。</li>
+      <li>screenshot 的计时从成功取得 Context 后开始，不包含资源池排队时间。</li>
+      <li>普通业务异常在 Page 清理成功后继续复用 Context。</li>
+      <li>只有超时或浏览器换代时才销毁并替换 Context。</li>
+      <li>原有重试范围和监控指标口径保持不变。</li>
+    </ul>
+
+    <p>也就是说，改造解决的是资源所有权和异常隔离问题，而不是借机重新定义接口行为。</p>
+
+    <h2>自动化验证</h2>
+
+    <p>针对新的生命周期逻辑，补充了不依赖真实 Chrome 的检查，覆盖以下场景：</p>
+
+    <ul>
+      <li>多次 render 后资源池容量保持稳定。</li>
+      <li>正常、提前返回和异常路径都能关闭 Page。</li>
+      <li>普通业务失败不会无条件重建 Context。</li>
+      <li>screenshot 超时后旧 Context 不再复用。</li>
+      <li>超时任务后续恢复时不能继续截图或重试。</li>
+      <li>Context 关闭完成前不会提前创建替代资源。</li>
+      <li>浏览器断线后 waiter 能够正常退出。</li>
+      <li>旧浏览器的 Context 不会进入新资源池。</li>
+      <li>Page 或 Context 初始化失败时能够正确清理。</li>
+      <li>render 不会被意外增加总超时。</li>
+      <li>screenshot 的 40 秒从资源获取完成后开始。</li>
+    </ul>
+
+    <h2>最终收益</h2>
+
+    <ul>
+      <li>资源池容量能够长期保持稳定。</li>
+      <li>Page 和 Context 的泄漏路径得到控制。</li>
+      <li>超时任务与后续请求彻底隔离。</li>
+      <li>高并发下减少无效定时器和事件循环压力。</li>
+      <li>浏览器断线后的恢复流程更加可靠。</li>
+      <li>生命周期逻辑集中，调用方不再重复管理资源。</li>
+      <li>在改善稳定性的同时保持原有业务语义。</li>
+    </ul>
+
+    <h2>总结</h2>
+
+    <p>浏览器资源池最重要的并不是“池里有多少资源”，而是明确每个资源在任意时刻归谁所有。</p>
+
+    <p>一个可靠的资源池至少需要保证三件事：</p>
+
+    <ol>
+      <li>每次获取最终都有对应的归还或销毁。</li>
+      <li>超时返回不等于底层任务已经结束。</li>
+      <li>已经失效的资源不能重新进入池中。</li>
+    </ol>
+
+    <blockquote><p><strong>当资源所有权被统一管理后，很多偶发的 Chrome 错误、请求卡死和内存增长问题，都会从根本上变得更容易控制。</strong></p></blockquote>
+  </article>
+</main>
+</body>
+</html>
