@@ -1,0 +1,23 @@
+writing/spring-ai-azure-custom-credential.html
+  s_fcfe95cbe5157a::t_16c5f7ab862215 1-233
+writing/index.html
+  s_fcfe95cbe5157a::t_16c5f7ab862215 20
+index.html
+  s_fcfe95cbe5157a::t_16c5f7ab862215 302
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.43-trip",
+  "base_commit_sha": "c34ed1b7bc594ed7ab79ee5d7fd0e0efdbd82ea9",
+  "prompts": {},
+  "sessions": {
+    "s_fcfe95cbe5157a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0569d-f005-70a0-9f02-25d3792e5780",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "c.kai <c.kai@trip.com>"
+    }
+  }
+}
